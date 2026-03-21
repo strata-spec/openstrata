@@ -1,0 +1,405 @@
+smif_version: "0.1.0"
+generated_at: "2026-03-20T10:00:00Z"
+tool_version: "strata/0.1.0-dev"
+
+source:
+  type: postgres
+  host_fingerprint: "a1b2c3d4e5f6a7b8"
+  schema_names:
+    - public
+
+domain:
+  name: ecommerce
+  description: >
+    Core ecommerce domain covering users, product catalog, orders, and line
+    items. The primary grain is one order per customer session. Revenue is
+    measured in USD at the order and line-item level.
+  key_concepts:
+    - customer lifetime value
+    - order fulfilment lifecycle
+    - product catalog management
+  known_gotchas:
+    - "orders.status is a free-text field in practise — valid values are: pending, processing, shipped, delivered, cancelled"
+    - "products.category_id is nullable; products without a category are still active"
+  provenance:
+    source_type: llm_inferred
+    confidence: 0.85
+    human_reviewed: false
+
+models:
+  - model_id: users
+    name: users
+    label: Users
+    grain: One row per registered user account
+    description: >
+      Registered application users. Each row represents a unique user account.
+      The primary login credential is the email address. country_code stores
+      the ISO 3166-1 alpha-2 code used to determine locale and pricing.
+    physical_source:
+      schema: public
+      table: users
+    primary_key: id
+    ddl_fingerprint: "c4e9f1a2b3d5e6f7"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.9
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: User ID
+        description: Surrogate primary key for the user account.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: email
+        data_type: text
+        role: dimension
+        label: Email Address
+        description: Primary login email address for the user. Must be unique across accounts.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.95
+          human_reviewed: false
+
+      - name: created_at
+        data_type: timestamptz
+        role: timestamp
+        label: Account Created At
+        description: Timestamp when the user account was first created, in UTC.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+      - name: country_code
+        data_type: text
+        role: dimension
+        label: Country Code
+        description: ISO 3166-1 alpha-2 country code for the user's locale (e.g. US, GB, DE).
+        nullable: false
+        cardinality_category: low
+        example_values:
+          - US
+          - GB
+          - DE
+          - FR
+          - AU
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.95
+          human_reviewed: false
+
+  - model_id: products
+    name: products
+    label: Products
+    grain: One row per sellable catalog product
+    description: >
+      Sellable product catalog. Each row is one product variant. price_usd
+      holds the current list price. Products with is_active = false are
+      no longer available for purchase but remain in the catalog for
+      historical order analysis.
+    physical_source:
+      schema: public
+      table: products
+    primary_key: id
+    ddl_fingerprint: "d6e7f8a9b0c1d2e3"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.88
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Product ID
+        description: Surrogate primary key for the product.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: name
+        data_type: text
+        role: dimension
+        label: Product Name
+        description: Display name of the product shown to customers in the storefront.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: price_usd
+        data_type: numeric
+        role: measure
+        label: List Price (USD)
+        description: Current list price of the product in US dollars. Point-in-time; not a historical price log.
+        nullable: false
+        cardinality_category: medium
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.95
+          human_reviewed: false
+
+      - name: category_id
+        data_type: bigint
+        role: dimension
+        label: Category ID
+        description: Foreign key to the product category. Nullable — products without a category are still active.
+        nullable: true
+        cardinality_category: low
+        example_values:
+          - "1"
+          - "2"
+          - "3"
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: is_active
+        data_type: boolean
+        role: flag
+        label: Active
+        description: Whether the product is currently available for purchase. Inactive products remain for historical reporting.
+        nullable: false
+        cardinality_category: low
+        example_values:
+          - "true"
+          - "false"
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+  - model_id: orders
+    name: orders
+    label: Orders
+    grain: One row per customer order
+    description: >
+      Customer orders placed through the storefront. Each row is one order
+      event. Revenue (total_usd) is the order-level total at time of
+      placement and does not reflect refunds or adjustments. status tracks
+      the fulfilment lifecycle.
+    physical_source:
+      schema: public
+      table: orders
+    primary_key: id
+    ddl_fingerprint: "e8f9a0b1c2d3e4f5"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.9
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Order ID
+        description: Surrogate primary key for the order.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: user_id
+        data_type: bigint
+        role: dimension
+        label: User ID
+        description: Foreign key to the users table identifying which customer placed the order.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: created_at
+        data_type: timestamptz
+        role: timestamp
+        label: Order Placed At
+        description: Timestamp when the order was submitted by the customer, in UTC.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+      - name: status
+        data_type: text
+        role: dimension
+        label: Order Status
+        description: >
+          Order lifecycle status. Known values: pending, processing, shipped,
+          delivered, cancelled. This is a free-text field — validate at the
+          application layer.
+        nullable: false
+        cardinality_category: low
+        example_values:
+          - pending
+          - processing
+          - shipped
+          - delivered
+          - cancelled
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.9
+          human_reviewed: false
+
+      - name: total_usd
+        data_type: numeric
+        role: measure
+        label: Order Total (USD)
+        description: Total order value in US dollars at time of placement. Does not include post-order adjustments or refunds.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+  - model_id: order_items
+    name: order_items
+    label: Order Line Items
+    grain: One row per product line item within an order
+    description: >
+      Individual product line items within customer orders. Each row represents
+      one product at the quantity and unit price at time of purchase. Summing
+      quantity * unit_price_usd across all rows for an order_id should equal
+      orders.total_usd for that order.
+    physical_source:
+      schema: public
+      table: order_items
+    primary_key: id
+    ddl_fingerprint: "f0a1b2c3d4e5f6a7"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.9
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Line Item ID
+        description: Surrogate primary key for the order line item.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: order_id
+        data_type: bigint
+        role: dimension
+        label: Order ID
+        description: Foreign key to the parent order in the orders table.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: product_id
+        data_type: bigint
+        role: dimension
+        label: Product ID
+        description: Foreign key to the product purchased on this line item.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: quantity
+        data_type: integer
+        role: measure
+        label: Quantity
+        description: Number of units of the product included in this line item.
+        nullable: false
+        cardinality_category: low
+        example_values:
+          - "1"
+          - "2"
+          - "3"
+        provenance:
+          source_type: ddl_comment
+          confidence: 0.95
+          human_reviewed: false
+
+      - name: unit_price_usd
+        data_type: numeric
+        role: measure
+        label: Unit Price (USD)
+        description: Price per unit of the product at the time the order was placed, in US dollars.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+relationships:
+  - relationship_id: rel_orders_users
+    from_model: orders
+    from_column: user_id
+    to_model: users
+    to_column: id
+    relationship_type: many_to_one
+    join_condition: "orders.user_id = users.id"
+    semantic_role: owner
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: rel_order_items_orders
+    from_model: order_items
+    from_column: order_id
+    to_model: orders
+    to_column: id
+    relationship_type: many_to_one
+    join_condition: "order_items.order_id = orders.id"
+    semantic_role: parent
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+  - relationship_id: rel_order_items_products
+    from_model: order_items
+    from_column: product_id
+    to_model: products
+    to_column: id
+    relationship_type: many_to_one
+    join_condition: "order_items.product_id = products.id"
+    semantic_role: product
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+metrics: []
