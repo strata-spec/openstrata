@@ -67,17 +67,21 @@ func Init(ctx context.Context, cfg Config) error {
 	defer pool.Close()
 
 	done = cfg.Progress.Stage("Stage 2 — table introspection")
-	tables, err := postgres.Introspect(ctx, pool, cfg.Schema)
+	tables, introspectWarning, err := postgres.Introspect(ctx, pool, cfg.Schema)
 	if err != nil {
 		done(err)
 		return fmt.Errorf("init: stage 2 introspect: %w", err)
 	}
 	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(tables)))
+	if introspectWarning != "" {
+		cfg.Progress.Info(introspectWarning)
+	}
 	done(nil)
 
-	if err := enforceTableCountLimits(cfg, tables); err != nil {
+	if err := checkTableCount(cfg.Schema, tables, cfg.MaxTables); err != nil {
 		return err
 	}
+	warnLargeSchema(cfg.Progress, tables)
 
 	done = cfg.Progress.Stage("Stage 3 — sample profiling")
 	stopSpin := spinner.Start("profiling tables...")
@@ -245,17 +249,21 @@ func Refresh(ctx context.Context, cfg Config) error {
 	defer pool.Close()
 
 	done = cfg.Progress.Stage("Stage 2 — table introspection")
-	liveTables, err := postgres.Introspect(ctx, pool, cfg.Schema)
+	liveTables, introspectWarning, err := postgres.Introspect(ctx, pool, cfg.Schema)
 	if err != nil {
 		done(err)
 		return fmt.Errorf("refresh: stage 2 introspect: %w", err)
 	}
 	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(liveTables)))
+	if introspectWarning != "" {
+		cfg.Progress.Info(introspectWarning)
+	}
 	done(nil)
 
-	if err := enforceTableCountLimits(cfg, liveTables); err != nil {
+	if err := checkTableCount(cfg.Schema, liveTables, cfg.MaxTables); err != nil {
 		return err
 	}
+	warnLargeSchema(cfg.Progress, liveTables)
 
 	done = cfg.Progress.Stage("Stage 3 — sample profiling")
 	stopSpin := spinner.Start("profiling tables...")
@@ -464,27 +472,41 @@ func summarizeFineResults(results []FinePassResult) (totalCols int, flagged int)
 	return totalCols, flagged
 }
 
-func enforceTableCountLimits(cfg Config, tables []postgres.TableInfo) error {
-	if cfg.MaxTables > 0 && len(tables) > cfg.MaxTables {
+func checkTableCount(schema string, tables []postgres.TableInfo, maxTables int) error {
+	if len(tables) == 0 {
+		return fmt.Errorf(
+			"no tables found in schema %q\n"+
+				"  Hint: check the schema name with:\n"+
+				"  psql <dsn> -c \"SELECT schemaname FROM pg_tables "+
+				"WHERE schemaname NOT IN ('pg_catalog','information_schema') "+
+				"GROUP BY schemaname ORDER BY schemaname;\"",
+			schema,
+		)
+	}
+
+	if maxTables > 0 && len(tables) > maxTables {
 		return fmt.Errorf(
 			"schema %q has %d tables, which exceeds --max-tables=%d\n"+
 				"  Hint: use --schema to target a specific schema, or raise "+
 				"--max-tables if you want to proceed.\n"+
 				"  Estimated LLM calls: %d (coarse) + %d (fine) = %d total",
-			cfg.Schema, len(tables), cfg.MaxTables,
+			schema, len(tables), maxTables,
 			len(tables)+1, len(tables), len(tables)*2+1,
 		)
 	}
 
+	return nil
+}
+
+func warnLargeSchema(progress Progress, tables []postgres.TableInfo) {
 	if len(tables) > 20 {
-		cfg.Progress.Info(fmt.Sprintf(
-			"⚠  %d tables found — this will make %d LLM calls and may take "+
-				"several minutes. Use --max-tables to set a limit.",
+		progress.Info(fmt.Sprintf(
+			"⚠  %d tables found — this will make approximately %d LLM "+
+				"calls and may take several minutes. Use --max-tables to "+
+				"set a limit.",
 			len(tables), len(tables)*2+1,
 		))
 	}
-
-	return nil
 }
 
 func assembleModel(

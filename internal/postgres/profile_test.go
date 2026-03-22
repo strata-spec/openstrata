@@ -74,7 +74,7 @@ func TestProfileEcommerce(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
 
-	tables, err := Introspect(context.Background(), pool, schema)
+	tables, _, err := Introspect(context.Background(), pool, schema)
 	if err != nil {
 		t.Fatalf("Introspect returned error: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestProfileUnsupportedType(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
 
-	tables, err := Introspect(context.Background(), pool, schema)
+	tables, _, err := Introspect(context.Background(), pool, schema)
 	if err != nil {
 		t.Fatalf("Introspect returned error: %v", err)
 	}

@@ -230,24 +230,37 @@ func TestWriteOutputsCreatesThreeFiles(t *testing.T) {
 	}
 }
 
+func TestEmptyTableError(t *testing.T) {
+	t.Parallel()
+
+	err := checkTableCount("wrong_schema", makeTablesForCountTests(0), 0)
+	if err == nil {
+		t.Fatalf("expected empty-schema error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no tables found in schema") {
+		t.Fatalf("expected no-tables error, got: %v", err)
+	}
+}
+
 func TestMaxTablesEnforced(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Schema: "public", MaxTables: 2, Progress: NoOpProgress{}}
-	err := enforceTableCountLimits(cfg, makeTablesForCountTests(3))
+	err := checkTableCount("public", makeTablesForCountTests(5), 3)
 	if err == nil {
 		t.Fatalf("expected max-tables error, got nil")
 	}
-	if !strings.Contains(err.Error(), "exceeds --max-tables") {
+	if !strings.Contains(err.Error(), "exceeds --max-tables=3") {
 		t.Fatalf("expected max-tables error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Estimated LLM calls") {
+		t.Fatalf("expected LLM calls estimate in error, got: %v", err)
 	}
 }
 
 func TestMaxTablesZeroMeansNoLimit(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Schema: "public", MaxTables: 0, Progress: NoOpProgress{}}
-	err := enforceTableCountLimits(cfg, makeTablesForCountTests(100))
+	err := checkTableCount("public", makeTablesForCountTests(100), 0)
 	if err != nil {
 		t.Fatalf("expected no max-tables error when limit is 0, got: %v", err)
 	}
@@ -257,11 +270,13 @@ func TestLargeSchemaWarning(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	cfg := Config{Schema: "public", MaxTables: 0, Progress: NewStderrProgress(&buf)}
-	err := enforceTableCountLimits(cfg, makeTablesForCountTests(21))
+	tables := makeTablesForCountTests(21)
+	err := checkTableCount("public", tables, 0)
 	if err != nil {
 		t.Fatalf("expected warning only, got error: %v", err)
 	}
+
+	warnLargeSchema(NewStderrProgress(&buf), tables)
 
 	out := buf.String()
 	if !strings.Contains(out, "⚠") {

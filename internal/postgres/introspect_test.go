@@ -145,9 +145,12 @@ func TestIntrospectEcommerce(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
 
-	tables, err := Introspect(context.Background(), pool, schema)
+	tables, warning, err := Introspect(context.Background(), pool, schema)
 	if err != nil {
 		t.Fatalf("Introspect returned error: %v", err)
+	}
+	if warning != "" {
+		t.Fatalf("expected no warning for ecommerce schema with FKs, got: %q", warning)
 	}
 
 	if len(tables) != 4 {
@@ -260,7 +263,7 @@ func TestIntrospectEmptySchema(t *testing.T) {
 		}
 	})
 
-	tables, err := Introspect(context.Background(), pool, schemaName)
+	tables, warning, err := Introspect(context.Background(), pool, schemaName)
 	if err != nil {
 		t.Fatalf("Introspect returned error for empty schema: %v", err)
 	}
@@ -268,12 +271,15 @@ func TestIntrospectEmptySchema(t *testing.T) {
 	if len(tables) != 0 {
 		t.Fatalf("expected 0 tables for empty schema, got %d", len(tables))
 	}
+	if warning != "" {
+		t.Fatalf("expected no warning for empty schema, got: %q", warning)
+	}
 }
 
 func TestIntrospectNonexistentSchema(t *testing.T) {
 	pool := integrationPool(t)
 
-	_, err := Introspect(context.Background(), pool, "strata_definitely_does_not_exist")
+	_, _, err := Introspect(context.Background(), pool, "strata_definitely_does_not_exist")
 	if err == nil {
 		t.Fatalf("expected error for nonexistent schema")
 	}
@@ -281,4 +287,69 @@ func TestIntrospectNonexistentSchema(t *testing.T) {
 	if !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		t.Fatalf("expected error to contain %q, got %q", "not found", err.Error())
 	}
+}
+
+func TestIntrospectReturnsWarningOnZeroFKs(t *testing.T) {
+	pool := integrationPool(t)
+	schemaName := fmt.Sprintf("strata_test_nofk_%s", strings.ReplaceAll(uuid.New().String(), "-", "")[:12])
+
+	_, err := pool.Exec(context.Background(), fmt.Sprintf("CREATE SCHEMA %s", schemaName))
+	if err != nil {
+		t.Fatalf("create no-fk schema: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_, dropErr := pool.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
+		if dropErr != nil {
+			t.Logf("warning: failed to drop test schema %s: %v", schemaName, dropErr)
+		}
+	})
+
+	ddl := fmt.Sprintf(`
+		CREATE TABLE %s.parents (
+			id BIGSERIAL PRIMARY KEY,
+			name TEXT NOT NULL
+		);
+		CREATE TABLE %s.children (
+			id BIGSERIAL PRIMARY KEY,
+			parent_name TEXT NOT NULL
+		);
+	`, schemaName, schemaName)
+	if _, err := pool.Exec(context.Background(), ddl); err != nil {
+		t.Fatalf("create no-fk tables: %v", err)
+	}
+
+	tables, warning, err := Introspect(context.Background(), pool, schemaName)
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatalf("expected non-empty tables for no-fk schema")
+	}
+	if warning == "" {
+		t.Fatalf("expected warning for schema with zero foreign keys")
+	}
+	if !strings.Contains(warning, "0 foreign keys found") {
+		t.Fatalf("expected warning to mention zero foreign keys, got: %q", warning)
+	}
+}
+
+func TestIntrospectNoWarningWhenFKsPresent(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	tables, warning, err := Introspect(context.Background(), pool, schema)
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatalf("expected non-empty tables for ecommerce schema")
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning when FKs exist, got: %q", warning)
+	}
+}
+
+func TestIntrospectSignature(t *testing.T) {
+	var _ func(context.Context, *pgxpool.Pool, string) ([]TableInfo, string, error) = Introspect
 }
