@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 )
@@ -34,11 +34,65 @@ type ColumnProfile struct {
 	NullCount           int64
 	ExampleValues       []string
 	CardinalityCategory string
+	DurationMS          int64
+}
+
+type profileContextKey string
+
+const profileTimeoutKey profileContextKey = "profile_timeout_secs"
+
+// ProfileProgress receives per-column and per-table events during profiling.
+// Implementations must be safe to call from multiple goroutines.
+type ProfileProgress interface {
+	// ColumnProfiled is called after each column is profiled.
+	ColumnProfiled(tableName, columnName string, done, total int)
+
+	// TableSkipped is called when profiling is skipped for a table.
+	TableSkipped(tableName string, reason string)
+}
+
+// ProfileProgressWithStats is an optional extension used by callers that need
+// the full column profile payload in callbacks.
+type ProfileProgressWithStats interface {
+	ColumnProfiledWithStats(tableName, columnName string, profile ColumnProfile, done, total int)
+}
+
+// NoOpProfileProgress discards all profiling progress events.
+type NoOpProfileProgress struct{}
+
+func (NoOpProfileProgress) ColumnProfiled(_, _ string, _, _ int) {}
+func (NoOpProfileProgress) TableSkipped(_, _ string)             {}
+
+// WithProfileTimeout stores per-table profiling timeout (seconds) in context.
+// A value <= 0 means no timeout.
+func WithProfileTimeout(ctx context.Context, secs int) context.Context {
+	return context.WithValue(ctx, profileTimeoutKey, secs)
 }
 
 // Profile collects sample data statistics for all columns in the given tables.
 // PII patterns are redacted from example values before they are stored.
-func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo) (map[string]ColumnProfile, error) {
+func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, progress ProfileProgress) (map[string]ColumnProfile, error) {
+	if progress == nil {
+		progress = NoOpProfileProgress{}
+	}
+
+	totalColumns := 0
+	for _, t := range tables {
+		totalColumns += len(t.Columns)
+	}
+
+	doneColumns := 0
+	var doneMu sync.Mutex
+	nextDone := func() int {
+		doneMu.Lock()
+		defer doneMu.Unlock()
+		doneColumns++
+		return doneColumns
+	}
+
+	profileTimeoutSecs := profileTimeoutFromContext(ctx)
+	useTableSample := poolSupportsTableSample(pool)
+
 	profiles := make(map[string]ColumnProfile)
 	var mu sync.Mutex
 
@@ -63,107 +117,64 @@ func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo) (map[s
 				}
 			}()
 
-			tableIdent := pgx.Identifier{t.Schema, t.Name}.Sanitize()
+			tableCtx := gctx
+			if profileTimeoutSecs > 0 {
+				var cancel context.CancelFunc
+				tableCtx, cancel = context.WithTimeout(gctx, time.Duration(profileTimeoutSecs)*time.Second)
+				defer cancel()
+			}
+
+			rowsByColumn, fetchErr := fetchTableSampleRows(tableCtx, pool, t, useTableSample)
+			if fetchErr != nil {
+				if errors.Is(fetchErr, context.Canceled) || errors.Is(fetchErr, context.DeadlineExceeded) {
+					if errors.Is(fetchErr, context.DeadlineExceeded) {
+						progress.TableSkipped(t.Name, "profiling timeout")
+						for _, col := range t.Columns {
+							profile := ColumnProfile{
+								TableName:           t.Name,
+								ColumnName:          col.Name,
+								ExampleValues:       []string{"[profiling timeout]"},
+								CardinalityCategory: "unknown",
+							}
+
+							mu.Lock()
+							profiles[t.Name+"."+col.Name] = profile
+							mu.Unlock()
+						}
+						return nil
+					}
+					return gctx.Err()
+				}
+
+				progress.TableSkipped(t.Name, "profiling query failed")
+				for _, col := range t.Columns {
+					profile := ColumnProfile{
+						TableName:           t.Name,
+						ColumnName:          col.Name,
+						ExampleValues:       []string{"[profiling error]"},
+						CardinalityCategory: "unknown",
+					}
+					mu.Lock()
+					profiles[t.Name+"."+col.Name] = profile
+					mu.Unlock()
+				}
+				return nil
+			}
 
 			for _, col := range t.Columns {
-				columnKey := t.Name + "." + col.Name
-				columnIdent := pgx.Identifier{col.Name}.Sanitize()
-
-				profile := ColumnProfile{
-					TableName:  t.Name,
-					ColumnName: col.Name,
-				}
-
-				distinctSQL := "SELECT COUNT(*) FROM (SELECT 1 FROM " + tableIdent + " WHERE " + columnIdent + " IS NOT NULL GROUP BY " + columnIdent + " LIMIT 10001) sub"
-				if qErr := pool.QueryRow(gctx, distinctSQL).Scan(&profile.DistinctCount); qErr != nil {
-					if errors.Is(qErr, context.Canceled) || errors.Is(qErr, context.DeadlineExceeded) || errors.Is(gctx.Err(), context.Canceled) || errors.Is(gctx.Err(), context.DeadlineExceeded) {
-						return gctx.Err()
-					}
-
-					profile.ExampleValues = []string{"[profiling error]"}
-					profile.CardinalityCategory = "unknown"
-					mu.Lock()
-					profiles[columnKey] = profile
-					mu.Unlock()
-					continue
-				}
-
-				nullSQL := "SELECT COUNT(*) FROM " + tableIdent + " WHERE " + columnIdent + " IS NULL"
-				if qErr := pool.QueryRow(gctx, nullSQL).Scan(&profile.NullCount); qErr != nil {
-					if errors.Is(qErr, context.Canceled) || errors.Is(qErr, context.DeadlineExceeded) || errors.Is(gctx.Err(), context.Canceled) || errors.Is(gctx.Err(), context.DeadlineExceeded) {
-						return gctx.Err()
-					}
-
-					profile.ExampleValues = []string{"[profiling error]"}
-					profile.CardinalityCategory = "unknown"
-					mu.Lock()
-					profiles[columnKey] = profile
-					mu.Unlock()
-					continue
-				}
-
-				exampleSQL := "SELECT DISTINCT " + columnIdent + "::text FROM " + tableIdent + " WHERE " + columnIdent + " IS NOT NULL LIMIT 10"
-				rows, qErr := pool.Query(gctx, exampleSQL)
-				if qErr != nil {
-					if errors.Is(qErr, context.Canceled) || errors.Is(qErr, context.DeadlineExceeded) || errors.Is(gctx.Err(), context.Canceled) || errors.Is(gctx.Err(), context.DeadlineExceeded) {
-						return gctx.Err()
-					}
-
-					if isUnsupportedTypeError(qErr) {
-						profile.ExampleValues = []string{"[unsupported type]"}
-						profile.CardinalityCategory = cardinalityCategory(profile.DistinctCount)
-					} else {
-						profile.ExampleValues = []string{"[profiling error]"}
-						profile.CardinalityCategory = "unknown"
-					}
-					mu.Lock()
-					profiles[columnKey] = profile
-					mu.Unlock()
-					continue
-				}
-
-				exampleValues := make([]string, 0, 10)
-				for rows.Next() {
-					var raw string
-					if scanErr := rows.Scan(&raw); scanErr != nil {
-						rows.Close()
-						if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) || errors.Is(gctx.Err(), context.Canceled) || errors.Is(gctx.Err(), context.DeadlineExceeded) {
-							return gctx.Err()
-						}
-
-						profile.ExampleValues = []string{"[profiling error]"}
-						profile.CardinalityCategory = "unknown"
-						mu.Lock()
-						profiles[columnKey] = profile
-						mu.Unlock()
-						goto nextColumn
-					}
-					exampleValues = append(exampleValues, RedactPII(raw))
-				}
-
-				if rowsErr := rows.Err(); rowsErr != nil {
-					rows.Close()
-					if errors.Is(rowsErr, context.Canceled) || errors.Is(rowsErr, context.DeadlineExceeded) || errors.Is(gctx.Err(), context.Canceled) || errors.Is(gctx.Err(), context.DeadlineExceeded) {
-						return gctx.Err()
-					}
-
-					profile.ExampleValues = []string{"[profiling error]"}
-					profile.CardinalityCategory = "unknown"
-					mu.Lock()
-					profiles[columnKey] = profile
-					mu.Unlock()
-					goto nextColumn
-				}
-				rows.Close()
-
-				profile.ExampleValues = exampleValues
-				profile.CardinalityCategory = cardinalityCategory(profile.DistinctCount)
+				start := time.Now()
+				profile := profileColumnFromSample(t.Name, col.Name, rowsByColumn[col.Name])
+				profile.DurationMS = time.Since(start).Milliseconds()
 
 				mu.Lock()
-				profiles[columnKey] = profile
+				profiles[t.Name+"."+col.Name] = profile
 				mu.Unlock()
 
-			nextColumn:
+				done := nextDone()
+				progress.ColumnProfiled(t.Name, col.Name, done, totalColumns)
+				if p, ok := progress.(ProfileProgressWithStats); ok {
+					p.ColumnProfiledWithStats(t.Name, col.Name, profile, done, totalColumns)
+				}
 			}
 
 			return nil
@@ -193,18 +204,6 @@ func RedactPII(value string) string {
 	return value
 }
 
-func isUnsupportedTypeError(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		if pgErr.Code == "42846" || pgErr.Code == "0A000" {
-			return true
-		}
-	}
-
-	errText := strings.ToLower(err.Error())
-	return strings.Contains(errText, "cannot cast") || strings.Contains(errText, "unsupported")
-}
-
 func cardinalityCategory(distinctCount int64) string {
 	if distinctCount < 100 {
 		return "low"
@@ -213,4 +212,171 @@ func cardinalityCategory(distinctCount int64) string {
 		return "medium"
 	}
 	return "high"
+}
+
+func profileTimeoutFromContext(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	v := ctx.Value(profileTimeoutKey)
+	if secs, ok := v.(int); ok {
+		return secs
+	}
+	return 0
+}
+
+func fetchTableSampleRows(ctx context.Context, pool *pgxpool.Pool, table TableInfo, useTableSample bool) (map[string][]any, error) {
+	tableIdent := pgx.Identifier{table.Schema, table.Name}.Sanitize()
+	query := "SELECT * FROM " + tableIdent + " LIMIT $1"
+	args := []any{10000}
+	if useTableSample {
+		query = "SELECT * FROM " + tableIdent + " TABLESAMPLE BERNOULLI($1) LIMIT $2"
+		args = []any{1.0, 10000}
+	}
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	rowValues := make(map[string][]any, len(table.Columns))
+	for _, col := range table.Columns {
+		rowValues[col.Name] = make([]any, 0, 1024)
+	}
+
+	fieldOrder := make([]string, 0, len(rows.FieldDescriptions()))
+	for _, fd := range rows.FieldDescriptions() {
+		fieldOrder = append(fieldOrder, string(fd.Name))
+	}
+
+	for rows.Next() {
+		vals, valuesErr := rows.Values()
+		if valuesErr != nil {
+			return nil, valuesErr
+		}
+
+		for i := range vals {
+			if i >= len(fieldOrder) {
+				continue
+			}
+			colName := fieldOrder[i]
+			if _, ok := rowValues[colName]; ok {
+				rowValues[colName] = append(rowValues[colName], vals[i])
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return rowValues, nil
+}
+
+func profileColumnFromSample(tableName, columnName string, values []any) ColumnProfile {
+	profile := ColumnProfile{
+		TableName:           tableName,
+		ColumnName:          columnName,
+		ExampleValues:       []string{},
+		CardinalityCategory: "low",
+	}
+
+	if len(values) == 0 {
+		profile.NullCount = 0
+		profile.DistinctCount = 0
+		profile.CardinalityCategory = "low"
+		return profile
+	}
+
+	distinct := make(map[string]struct{})
+	examples := make(map[string]struct{})
+	unsupported := false
+
+	for _, raw := range values {
+		if raw == nil {
+			profile.NullCount++
+			continue
+		}
+
+		textVal, ok := valueToString(raw)
+		if !ok {
+			unsupported = true
+			continue
+		}
+
+		distinct[textVal] = struct{}{}
+		if len(examples) < 10 {
+			examples[RedactPII(textVal)] = struct{}{}
+		}
+	}
+
+	profile.DistinctCount = int64(len(distinct))
+	profile.CardinalityCategory = cardinalityCategory(profile.DistinctCount)
+
+	if unsupported {
+		profile.ExampleValues = []string{"[unsupported type]"}
+		return profile
+	}
+
+	if len(examples) == 0 {
+		profile.ExampleValues = []string{}
+		return profile
+	}
+
+	vals := make([]string, 0, len(examples))
+	for v := range examples {
+		vals = append(vals, v)
+	}
+	sort.Strings(vals)
+	if len(vals) > 10 {
+		vals = vals[:10]
+	}
+	profile.ExampleValues = vals
+
+	return profile
+}
+
+func valueToString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case []byte:
+		return string(t), true
+	case fmt.Stringer:
+		return t.String(), true
+	case int:
+		return fmt.Sprintf("%d", t), true
+	case int8:
+		return fmt.Sprintf("%d", t), true
+	case int16:
+		return fmt.Sprintf("%d", t), true
+	case int32:
+		return fmt.Sprintf("%d", t), true
+	case int64:
+		return fmt.Sprintf("%d", t), true
+	case uint:
+		return fmt.Sprintf("%d", t), true
+	case uint8:
+		return fmt.Sprintf("%d", t), true
+	case uint16:
+		return fmt.Sprintf("%d", t), true
+	case uint32:
+		return fmt.Sprintf("%d", t), true
+	case uint64:
+		return fmt.Sprintf("%d", t), true
+	case float32:
+		return fmt.Sprintf("%g", t), true
+	case float64:
+		return fmt.Sprintf("%g", t), true
+	case bool:
+		if t {
+			return "true", true
+		}
+		return "false", true
+	case time.Time:
+		return t.Format(time.RFC3339Nano), true
+	default:
+		return "", false
+	}
 }

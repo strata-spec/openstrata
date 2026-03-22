@@ -29,14 +29,14 @@ func NewAnthropicClient() (*AnthropicClient, error) {
 }
 
 // GenerateStructured sends a structured prompt to Anthropic.
-func (c *AnthropicClient) GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) error {
+func (c *AnthropicClient) GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) (GenerateResult, error) {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		return fmt.Errorf("anthropic: missing ANTHROPIC_API_KEY")
+		return GenerateResult{}, fmt.Errorf("anthropic: missing ANTHROPIC_API_KEY")
 	}
 
 	var schemaMap map[string]any
 	if err := json.Unmarshal(schema, &schemaMap); err != nil {
-		return fmt.Errorf("anthropic: parse json schema: %w", err)
+		return GenerateResult{}, fmt.Errorf("anthropic: parse json schema: %w", err)
 	}
 
 	inputSchema := anthropic.ToolInputSchemaParam{ExtraFields: schemaMap}
@@ -55,19 +55,22 @@ func (c *AnthropicClient) GenerateStructured(ctx context.Context, prompt string,
 	for attempt := 0; attempt < 2; attempt++ {
 		resp, err := c.client.Messages.New(ctx, request)
 		if err != nil {
-			return fmt.Errorf("anthropic: api call failed: %w", err)
+			return GenerateResult{}, fmt.Errorf("anthropic: api call failed: %w", err)
 		}
 
 		parseErr := extractAnthropicToolResult(resp, result)
 		if parseErr == nil {
-			return nil
+			return GenerateResult{
+				TokensIn:  int(resp.Usage.InputTokens),
+				TokensOut: int(resp.Usage.OutputTokens),
+			}, nil
 		}
 		if attempt == 1 {
-			return fmt.Errorf("anthropic: malformed structured output: %w", parseErr)
+			return GenerateResult{}, fmt.Errorf("anthropic: malformed structured output: %w", parseErr)
 		}
 	}
 
-	return fmt.Errorf("anthropic: malformed structured output")
+	return GenerateResult{}, fmt.Errorf("anthropic: malformed structured output")
 }
 
 // Provider returns the provider identifier.

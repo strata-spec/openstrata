@@ -39,6 +39,8 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("connect: ping: %w", err)
 	}
 
+	cachePoolCapabilities(ctx, pool)
+
 	return pool, nil
 }
 

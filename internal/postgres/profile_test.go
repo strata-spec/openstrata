@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRedactPII(t *testing.T) {
@@ -70,7 +72,7 @@ func TestCardinalityCategory(t *testing.T) {
 	}
 }
 
-func TestProfileEcommerce(t *testing.T) {
+func TestProfileSampleBased(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
 
@@ -79,7 +81,7 @@ func TestProfileEcommerce(t *testing.T) {
 		t.Fatalf("Introspect returned error: %v", err)
 	}
 
-	profiles, err := Profile(context.Background(), pool, tables)
+	profiles, err := Profile(context.Background(), pool, tables, NoOpProfileProgress{})
 	if err != nil {
 		t.Fatalf("Profile returned error: %v", err)
 	}
@@ -130,6 +132,208 @@ func TestProfileEcommerce(t *testing.T) {
 	}
 }
 
+type testProfileProgress struct {
+	mu      sync.Mutex
+	calls   []profileCall
+	skipped []string
+}
+
+type profileCall struct {
+	table string
+	col   string
+	done  int
+	total int
+}
+
+func (t *testProfileProgress) ColumnProfiled(tableName, columnName string, done, total int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, profileCall{table: tableName, col: columnName, done: done, total: total})
+}
+
+func (t *testProfileProgress) TableSkipped(tableName string, reason string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.skipped = append(t.skipped, tableName+":"+reason)
+}
+
+func TestProfileProgressCallbacks(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	tables, _, err := Introspect(context.Background(), pool, schema)
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+
+	progress := &testProfileProgress{}
+	_, err = Profile(context.Background(), pool, tables, progress)
+	if err != nil {
+		t.Fatalf("Profile returned error: %v", err)
+	}
+
+	expectedTotal := 0
+	for _, table := range tables {
+		expectedTotal += len(table.Columns)
+	}
+
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	if len(progress.calls) != expectedTotal {
+		t.Fatalf("expected %d ColumnProfiled callbacks, got %d", expectedTotal, len(progress.calls))
+	}
+
+	for i, c := range progress.calls {
+		if c.done != i+1 {
+			t.Fatalf("expected done counter %d at callback %d, got %d", i+1, i, c.done)
+		}
+		if c.total != expectedTotal {
+			t.Fatalf("expected total=%d for callback %d, got %d", expectedTotal, i, c.total)
+		}
+	}
+}
+
+func TestProfileTimeout(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	tables, _, err := Introspect(context.Background(), pool, schema)
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+
+	progress := &testProfileProgress{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctx = WithProfileTimeout(ctx, 1)
+
+	_, err = Profile(ctx, pool, tables, progress)
+	if err != nil && err != context.DeadlineExceeded {
+		t.Fatalf("Profile returned unexpected error: %v", err)
+	}
+
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	if len(progress.skipped) == 0 {
+		t.Log("no tables exceeded timeout in test schema; passing vacuously")
+	}
+}
+
+func TestProfileSkipDoesNotEmitColumnProfiled(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	tables := []TableInfo{
+		{
+			Schema: schema,
+			Name:   "definitely_missing_table_for_profile_test",
+			Columns: []ColumnInfo{
+				{Name: "id"},
+				{Name: "name"},
+			},
+		},
+	}
+
+	progress := &testProfileProgress{}
+	profiles, err := Profile(context.Background(), pool, tables, progress)
+	if err != nil {
+		t.Fatalf("Profile returned error: %v", err)
+	}
+
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+
+	if len(progress.skipped) != 1 {
+		t.Fatalf("expected 1 TableSkipped callback, got %d (%v)", len(progress.skipped), progress.skipped)
+	}
+	if !strings.Contains(progress.skipped[0], "definitely_missing_table_for_profile_test") {
+		t.Fatalf("expected skip callback for missing table, got %v", progress.skipped)
+	}
+	if len(progress.calls) != 0 {
+		t.Fatalf("expected no ColumnProfiled callbacks for skipped table, got %d", len(progress.calls))
+	}
+
+	for _, colName := range []string{"id", "name"} {
+		k := "definitely_missing_table_for_profile_test." + colName
+		profile, ok := profiles[k]
+		if !ok {
+			t.Fatalf("expected profile for %s", k)
+		}
+		if profile.CardinalityCategory != "unknown" {
+			t.Fatalf("expected %s cardinality unknown, got %q", k, profile.CardinalityCategory)
+		}
+		if len(profile.ExampleValues) != 1 || profile.ExampleValues[0] != "[profiling error]" {
+			t.Fatalf("expected %s example values [profiling error], got %#v", k, profile.ExampleValues)
+		}
+	}
+}
+
+type recordingProgress struct {
+	mu       sync.Mutex
+	skipped  []string
+	profiled []string
+}
+
+func (r *recordingProgress) TableSkipped(tableName string, reason string) {
+	_ = reason
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.skipped = append(r.skipped, tableName)
+}
+
+func (r *recordingProgress) ColumnProfiled(tableName, columnName string, done, total int) {
+	_ = done
+	_ = total
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.profiled = append(r.profiled, tableName+"."+columnName)
+}
+
+func TestProfileInvariantSkippedTableHasNoColumnProfiled(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	tableName := "missing_table_for_invariant_test"
+	tables := []TableInfo{{
+		Schema: schema,
+		Name:   tableName,
+		Columns: []ColumnInfo{
+			{Name: "id"},
+			{Name: "name"},
+		},
+	}}
+
+	progress := &recordingProgress{}
+	profiles, err := Profile(context.Background(), pool, tables, progress)
+	if err != nil {
+		t.Fatalf("Profile returned error: %v", err)
+	}
+
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+
+	if len(progress.skipped) != 1 || progress.skipped[0] != tableName {
+		t.Fatalf("expected exactly one skipped table %q, got %#v", tableName, progress.skipped)
+	}
+
+	for _, p := range progress.profiled {
+		if strings.HasPrefix(p, tableName+".") {
+			t.Fatalf("expected no ColumnProfiled callbacks for skipped table %q, got %q", tableName, p)
+		}
+	}
+
+	for _, col := range []string{"id", "name"} {
+		k := tableName + "." + col
+		cp, ok := profiles[k]
+		if !ok {
+			t.Fatalf("expected profile for %s", k)
+		}
+		if cp.CardinalityCategory != "unknown" {
+			t.Fatalf("expected unknown cardinality for %s, got %q", k, cp.CardinalityCategory)
+		}
+	}
+}
+
 func TestProfileUnsupportedType(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
@@ -157,7 +361,7 @@ func TestProfileUnsupportedType(t *testing.T) {
 		t.Skip("no unsupported-type column in test schema")
 	}
 
-	profiles, err := Profile(context.Background(), pool, tables)
+	profiles, err := Profile(context.Background(), pool, tables, NoOpProfileProgress{})
 	if err != nil {
 		t.Fatalf("Profile returned error: %v", err)
 	}

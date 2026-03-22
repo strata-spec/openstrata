@@ -221,8 +221,12 @@ func TestWriteOutputsCreatesThreeFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read corrections.yaml: %v", err)
 	}
-	if !strings.Contains(string(cb), "corrections: []") {
-		t.Fatalf("expected corrections.yaml to contain corrections: []")
+	content := string(cb)
+	if !strings.Contains(content, "smif_version: \"0.1.0\"") {
+		t.Fatalf("expected corrections.yaml to contain smif_version, got: %q", content)
+	}
+	if !strings.Contains(content, "corrections:") {
+		t.Fatalf("expected corrections.yaml to contain corrections key, got: %q", content)
 	}
 
 	if _, err := smif.ReadYAML(yamlPath); err != nil {

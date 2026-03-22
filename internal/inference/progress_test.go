@@ -60,7 +60,7 @@ func TestStderrProgressItem(t *testing.T) {
 	p.Item("some item")
 
 	out := buf.String()
-	if !strings.Contains(out, "→ some item") {
+	if !strings.Contains(out, "some item") {
 		t.Fatalf("expected item output, got %q", out)
 	}
 }

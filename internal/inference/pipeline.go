@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	coarsepkg "github.com/strata-spec/openstrata/internal/inference/coarse"
@@ -15,6 +16,7 @@ import (
 	joinspkg "github.com/strata-spec/openstrata/internal/inference/joins"
 	"github.com/strata-spec/openstrata/internal/inference/llm"
 	"github.com/strata-spec/openstrata/internal/postgres"
+	"github.com/strata-spec/openstrata/internal/runlog"
 	"github.com/strata-spec/openstrata/internal/smif"
 	appversion "github.com/strata-spec/openstrata/internal/version"
 	"gopkg.in/yaml.v3"
@@ -22,15 +24,18 @@ import (
 
 // Config holds the parameters for an inference pipeline run.
 type Config struct {
-	DSN             string
-	Schema          string
-	MaxTables       int
-	Tables          []string
-	EnableLogMining bool
-	StrataMDPath    string
-	LLM             llm.LLMClient
-	Progress        Progress
-	OutputDir       string
+	DSN                string
+	Schema             string
+	MaxTables          int
+	Tables             []string
+	EnableLogMining    bool
+	StrataMDPath       string
+	LLM                llm.LLMClient
+	Progress           Progress
+	OutputDir          string
+	ProfileTimeoutSecs int
+	SkipProfiling      bool
+	RunLog             *runlog.Logger
 }
 
 // Init runs the full inference pipeline (Stages 1–9) and writes
@@ -38,6 +43,18 @@ type Config struct {
 func Init(ctx context.Context, cfg Config) error {
 	cfg = normalizeConfig(cfg)
 	spinner := NewSpinner(os.Stderr)
+
+	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+		return fmt.Errorf("init: create output directory: %w", err)
+	}
+	logPath := filepath.Join(cfg.OutputDir, "strata.log")
+	rl, err := runlog.Open(logPath)
+	if err != nil {
+		cfg.Progress.Info(fmt.Sprintf("⚠  could not open strata.log: %v", err))
+		rl = runlog.NoOp()
+	}
+	defer func() { _ = rl.Close() }()
+	cfg.RunLog = rl
 
 	done := cfg.Progress.Stage("Stage 1 — strata.md ingestion")
 	strataMD, strataMDFound, err := Load(cfg.StrataMDPath)
@@ -68,8 +85,11 @@ func Init(ctx context.Context, cfg Config) error {
 	defer pool.Close()
 
 	done = cfg.Progress.Stage("Stage 2 — table introspection")
+	stageStart := time.Now()
+	cfg.RunLog.Write(runlog.Entry{Stage: 2, Event: "stage_start", Message: "table introspection"})
 	tables, introspectWarning, err := postgres.Introspect(ctx, pool, cfg.Schema)
 	if err != nil {
+		cfg.RunLog.Write(runlog.Entry{Stage: 2, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
 		done(err)
 		return fmt.Errorf("init: stage 2 introspect: %w", err)
 	}
@@ -78,6 +98,7 @@ func Init(ctx context.Context, cfg Config) error {
 	if introspectWarning != "" {
 		cfg.Progress.Info(introspectWarning)
 	}
+	cfg.RunLog.Write(runlog.Entry{Stage: 2, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
 	done(nil)
 
 	tables, err = filterTables(tables, cfg.Tables)
@@ -96,16 +117,47 @@ func Init(ctx context.Context, cfg Config) error {
 	}
 	warnLargeSchema(cfg.Progress, tables)
 
-	done = cfg.Progress.Stage("Stage 3 — sample profiling")
-	stopSpin := spinner.Start("profiling tables...")
-	profiles, err := postgres.Profile(ctx, pool, tables)
-	stopSpin()
-	if err != nil {
-		done(err)
-		return fmt.Errorf("init: stage 3 profile: %w", err)
+	totalCols := totalColumnCount(tables)
+	profProgress := &pipelineProfileProgress{
+		progress: cfg.Progress,
+		total:    totalCols,
+		runLog:   cfg.RunLog,
 	}
-	cfg.Progress.Info(fmt.Sprintf("%d columns profiled", totalColumnCount(tables)))
-	done(nil)
+	var stopSpin func()
+
+	var profiles map[string]postgres.ColumnProfile
+	if cfg.SkipProfiling {
+		cfg.Progress.Info("Stage 3 — sample profiling skipped (--skip-profiling)")
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_start", Message: "sample profiling skipped"})
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: 0})
+		profiles = make(map[string]postgres.ColumnProfile)
+	} else {
+		done = cfg.Progress.Stage("Stage 3 — sample profiling")
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_start", Message: "sample profiling"})
+		stageStart = time.Now()
+		stopSpin = spinner.Start("profiling tables...")
+		profileCtx := postgres.WithProfileTimeout(ctx, cfg.ProfileTimeoutSecs)
+		profiles, err = postgres.Profile(profileCtx, pool, tables, profProgress)
+		stopSpin()
+		if err != nil {
+			cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
+			done(err)
+			return fmt.Errorf("init: stage 3 profile: %w", err)
+		}
+		successful, failed, timedOut := summarizeProfileResults(profiles)
+		if failed+timedOut == 0 {
+			cfg.Progress.Info(fmt.Sprintf("%d columns profiled", successful))
+		} else {
+			cfg.Progress.Info(fmt.Sprintf(
+				"%d columns profiled, %d with profiling error defaults, %d with timeout defaults",
+				successful,
+				failed,
+				timedOut,
+			))
+		}
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
+		done(nil)
+	}
 
 	var usageProfiles []postgres.UsageProfile
 	if cfg.EnableLogMining {
@@ -120,13 +172,25 @@ func Init(ctx context.Context, cfg Config) error {
 	}
 
 	done = cfg.Progress.Stage("Stage 5 — LLM domain pass")
+	stageStart = time.Now()
+	cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_start", Message: "domain pass"})
 	stopSpin = spinner.Start("calling LLM for domain description...")
 	domainResult, err := RunDomainPass(ctx, cfg.LLM, tables, strataMD)
 	stopSpin()
 	if err != nil {
+		cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
 		done(err)
 		return fmt.Errorf("init: stage 5 domain pass: %w", err)
 	}
+	cfg.RunLog.Write(runlog.Entry{
+		Stage:      5,
+		Event:      "llm_call",
+		Message:    "domain pass",
+		TokensIn:   domainResult.TokensIn,
+		TokensOut:  domainResult.TokensOut,
+		DurationMS: time.Since(stageStart).Milliseconds(),
+	})
+	cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
 	cfg.Progress.Info(fmt.Sprintf("domain: %s", domainResult.Name))
 	done(nil)
 
@@ -142,13 +206,26 @@ func Init(ctx context.Context, cfg Config) error {
 	done(nil)
 
 	done = cfg.Progress.Stage("Stage 6 — LLM fine pass")
+	stageStart = time.Now()
+	cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_start", Message: "fine pass"})
 	stopSpin = spinner.Start(fmt.Sprintf("annotating columns across %d tables...", len(tables)))
 	fineResults, err := RunFinePass(ctx, cfg.LLM, tables, profiles, tableResults, domainResult, strataMD)
 	stopSpin()
 	if err != nil {
+		cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
 		done(err)
 		return fmt.Errorf("init: stage 6 fine pass: %w", err)
 	}
+	for _, fr := range fineResults {
+		cfg.RunLog.Write(runlog.Entry{
+			Stage:     6,
+			Event:     "llm_call",
+			Table:     fr.TableName,
+			TokensIn:  fr.TokensIn,
+			TokensOut: fr.TokensOut,
+		})
+	}
+	cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
 	totalCols, flagged := summarizeFineResults(fineResults)
 	cfg.Progress.Info(fmt.Sprintf("%d columns annotated, %d flagged for review", totalCols, flagged))
 	done(nil)
@@ -215,6 +292,19 @@ func Init(ctx context.Context, cfg Config) error {
 func Refresh(ctx context.Context, cfg Config) error {
 	cfg = normalizeConfig(cfg)
 	spinner := NewSpinner(os.Stderr)
+	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+		return fmt.Errorf("refresh: create output directory: %w", err)
+	}
+	if cfg.RunLog == nil {
+		logPath := filepath.Join(cfg.OutputDir, "strata.log")
+		rl, err := runlog.Open(logPath)
+		if err != nil {
+			cfg.Progress.Info(fmt.Sprintf("⚠  could not open strata.log: %v", err))
+			rl = runlog.NoOp()
+		}
+		defer func() { _ = rl.Close() }()
+		cfg.RunLog = rl
+	}
 
 	semanticPath := filepath.Join(cfg.OutputDir, "semantic.yaml")
 	correctionsPath := filepath.Join(cfg.OutputDir, "corrections.yaml")
@@ -290,16 +380,45 @@ func Refresh(ctx context.Context, cfg Config) error {
 	}
 	warnLargeSchema(cfg.Progress, liveTables)
 
-	done = cfg.Progress.Stage("Stage 3 — sample profiling")
-	stopSpin := spinner.Start("profiling tables...")
-	profiles, err := postgres.Profile(ctx, pool, liveTables)
-	stopSpin()
-	if err != nil {
-		done(err)
-		return fmt.Errorf("refresh: stage 3 profile: %w", err)
+	profProgress := &pipelineProfileProgress{
+		progress: cfg.Progress,
+		total:    totalColumnCount(liveTables),
+		runLog:   cfg.RunLog,
 	}
-	cfg.Progress.Info(fmt.Sprintf("%d columns profiled", totalColumnCount(liveTables)))
-	done(nil)
+	var stopSpin func()
+	var profiles map[string]postgres.ColumnProfile
+	if cfg.SkipProfiling {
+		cfg.Progress.Info("Stage 3 — sample profiling skipped (--skip-profiling)")
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_start", Message: "sample profiling skipped"})
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: 0})
+		profiles = make(map[string]postgres.ColumnProfile)
+	} else {
+		done = cfg.Progress.Stage("Stage 3 — sample profiling")
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_start", Message: "sample profiling"})
+		stageStart := time.Now()
+		stopSpin = spinner.Start("profiling tables...")
+		profileCtx := postgres.WithProfileTimeout(ctx, cfg.ProfileTimeoutSecs)
+		profiles, err = postgres.Profile(profileCtx, pool, liveTables, profProgress)
+		stopSpin()
+		if err != nil {
+			cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
+			done(err)
+			return fmt.Errorf("refresh: stage 3 profile: %w", err)
+		}
+		successful, failed, timedOut := summarizeProfileResults(profiles)
+		if failed+timedOut == 0 {
+			cfg.Progress.Info(fmt.Sprintf("%d columns profiled", successful))
+		} else {
+			cfg.Progress.Info(fmt.Sprintf(
+				"%d columns profiled, %d with profiling error defaults, %d with timeout defaults",
+				successful,
+				failed,
+				timedOut,
+			))
+		}
+		cfg.RunLog.Write(runlog.Entry{Stage: 3, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
+		done(nil)
+	}
 
 	var usageProfiles []postgres.UsageProfile
 	if cfg.EnableLogMining {
@@ -351,13 +470,25 @@ func Refresh(ctx context.Context, cfg Config) error {
 	var fineResults []FinePassResult
 	if len(changedOrNew) > 0 {
 		done = cfg.Progress.Stage("Stage 5 — LLM domain pass")
+		stageStart := time.Now()
+		cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_start", Message: "domain pass"})
 		stopSpin = spinner.Start("calling LLM for domain description...")
 		domainResult, err = RunDomainPass(ctx, cfg.LLM, liveTables, strataMD)
 		stopSpin()
 		if err != nil {
+			cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
 			done(err)
 			return fmt.Errorf("refresh: stage 5 domain pass: %w", err)
 		}
+		cfg.RunLog.Write(runlog.Entry{
+			Stage:      5,
+			Event:      "llm_call",
+			Message:    "domain pass",
+			TokensIn:   domainResult.TokensIn,
+			TokensOut:  domainResult.TokensOut,
+			DurationMS: time.Since(stageStart).Milliseconds(),
+		})
+		cfg.RunLog.Write(runlog.Entry{Stage: 5, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
 		cfg.Progress.Info(fmt.Sprintf("domain: %s", domainResult.Name))
 		done(nil)
 
@@ -373,13 +504,26 @@ func Refresh(ctx context.Context, cfg Config) error {
 		done(nil)
 
 		done = cfg.Progress.Stage("Stage 6 — LLM fine pass")
+		stageStart = time.Now()
+		cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_start", Message: "fine pass"})
 		stopSpin = spinner.Start(fmt.Sprintf("annotating columns across %d tables...", len(changedOrNew)))
 		fineResults, err = RunFinePass(ctx, cfg.LLM, changedOrNew, profiles, tableResults, domainResult, strataMD)
 		stopSpin()
 		if err != nil {
+			cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds(), Error: err.Error()})
 			done(err)
 			return fmt.Errorf("refresh: stage 6 fine pass: %w", err)
 		}
+		for _, fr := range fineResults {
+			cfg.RunLog.Write(runlog.Entry{
+				Stage:     6,
+				Event:     "llm_call",
+				Table:     fr.TableName,
+				TokensIn:  fr.TokensIn,
+				TokensOut: fr.TokensOut,
+			})
+		}
+		cfg.RunLog.Write(runlog.Entry{Stage: 6, Event: "stage_complete", DurationMS: time.Since(stageStart).Milliseconds()})
 		totalCols, flagged := summarizeFineResults(fineResults)
 		cfg.Progress.Info(fmt.Sprintf("%d columns annotated, %d flagged for review", totalCols, flagged))
 		done(nil)
@@ -474,6 +618,9 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.OutputDir) == "" {
 		cfg.OutputDir = "."
 	}
+	if cfg.ProfileTimeoutSecs < 0 {
+		cfg.ProfileTimeoutSecs = 30
+	}
 	return cfg
 }
 
@@ -483,6 +630,43 @@ func totalColumnCount(tables []postgres.TableInfo) int {
 		total += len(table.Columns)
 	}
 	return total
+}
+
+type pipelineProfileProgress struct {
+	progress Progress
+	total    int
+	runLog   *runlog.Logger
+	mu       sync.Mutex
+	done     int
+}
+
+func (p *pipelineProfileProgress) ColumnProfiled(tableName, columnName string, done, total int) {
+	_ = done
+	_ = total
+	p.mu.Lock()
+	p.done++
+	current := p.done
+	p.mu.Unlock()
+	p.progress.Item(fmt.Sprintf("profiled %s.%s (%d/%d columns)", tableName, columnName, current, p.total))
+}
+
+func (p *pipelineProfileProgress) ColumnProfiledWithStats(tableName, columnName string, profile postgres.ColumnProfile, done, total int) {
+	_ = done
+	_ = total
+	p.runLog.Write(runlog.Entry{
+		Stage:         3,
+		Event:         "column_profiled",
+		Table:         tableName,
+		Column:        columnName,
+		DurationMS:    profile.DurationMS,
+		DistinctCount: profile.DistinctCount,
+		NullCount:     profile.NullCount,
+	})
+}
+
+func (p *pipelineProfileProgress) TableSkipped(tableName string, reason string) {
+	p.progress.Info(fmt.Sprintf("⚠  skipped profiling %s: %s", tableName, reason))
+	p.runLog.Write(runlog.Entry{Stage: 3, Event: "table_skipped", Table: tableName, Message: reason})
 }
 
 func summarizeFineResults(results []FinePassResult) (totalCols int, flagged int) {
@@ -495,6 +679,23 @@ func summarizeFineResults(results []FinePassResult) (totalCols int, flagged int)
 		}
 	}
 	return totalCols, flagged
+}
+
+func summarizeProfileResults(profiles map[string]postgres.ColumnProfile) (successful int, failed int, timedOut int) {
+	for _, p := range profiles {
+		if len(p.ExampleValues) == 1 {
+			switch p.ExampleValues[0] {
+			case "[profiling error]":
+				failed++
+				continue
+			case "[profiling timeout]":
+				timedOut++
+				continue
+			}
+		}
+		successful++
+	}
+	return successful, failed, timedOut
 }
 
 // filterTables returns only the tables whose names are in the allowlist.

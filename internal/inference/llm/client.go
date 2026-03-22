@@ -15,10 +15,16 @@ type LLMClient interface {
 	// forcing structured output using provider-appropriate mechanisms
 	// (tool-use forcing for Anthropic, response_format for OpenAI).
 	// Retries once on malformed output before returning an error.
-	GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) error
+	GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) (GenerateResult, error)
 
 	// Provider returns a string identifying the provider (for logging).
 	Provider() string
+}
+
+// GenerateResult contains metadata returned by a structured generation call.
+type GenerateResult struct {
+	TokensIn  int
+	TokensOut int
 }
 
 // ProviderFromString returns an LLMClient for the named provider.

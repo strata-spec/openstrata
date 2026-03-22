@@ -42,12 +42,16 @@ type DomainResult struct {
 	KeyConcepts   []string `json:"key_concepts"`
 	TemporalModel string   `json:"temporal_model"`
 	KnownGotchas  []string `json:"known_gotchas"`
+	TokensIn      int      `json:"-"`
+	TokensOut     int      `json:"-"`
 }
 
 type TableResult struct {
 	TableName   string `json:"table_name"`
 	Description string `json:"description"`
 	Grain       string `json:"grain"`
+	TokensIn    int    `json:"-"`
+	TokensOut   int    `json:"-"`
 }
 
 // RunDomainPass executes a single LLM call to produce a domain-level
@@ -56,9 +60,12 @@ func RunDomainPass(ctx context.Context, llmClient llm.LLMClient, tables []postgr
 	prompt := buildDomainPrompt(tables, strataMD)
 
 	var out DomainResult
-	if err := llmClient.GenerateStructured(ctx, prompt, domainSchema, &out); err != nil {
+	gen, err := llmClient.GenerateStructured(ctx, prompt, domainSchema, &out)
+	if err != nil {
 		return nil, fmt.Errorf("coarse pass: domain call failed: %w", err)
 	}
+	out.TokensIn = gen.TokensIn
+	out.TokensOut = gen.TokensOut
 	return &out, nil
 }
 
@@ -86,10 +93,13 @@ func RunTablePass(ctx context.Context, llmClient llm.LLMClient, tables []postgre
 
 			prompt := buildTablePrompt(t, domain, strataMD)
 			var tr TableResult
-			if err := llmClient.GenerateStructured(gctx, prompt, tableSchema, &tr); err != nil {
+			gen, err := llmClient.GenerateStructured(gctx, prompt, tableSchema, &tr)
+			if err != nil {
 				log.Printf("coarse pass: table %s: %v - skipping", t.Name, err)
 				return nil
 			}
+			tr.TokensIn = gen.TokensIn
+			tr.TokensOut = gen.TokensOut
 
 			mu.Lock()
 			results[idx] = tr

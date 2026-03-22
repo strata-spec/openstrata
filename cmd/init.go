@@ -16,6 +16,8 @@ func newInitCmd() *cobra.Command {
 	var enableLogMining bool
 	var strataMDPath string
 	var refresh bool
+	var skipProfiling bool
+	var profileTimeout int
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -43,14 +45,16 @@ func newInitCmd() *cobra.Command {
 			}
 
 			cfg := inference.Config{
-				DSN:             dbFlag,
-				Schema:          schema,
-				EnableLogMining: enableLogMining,
-				StrataMDPath:    strataMDPath,
-				LLM:             provider,
-				Progress:        inference.NewStderrProgress(os.Stderr),
-				MaxTables:       maxTables,
-				Tables:          tables,
+				DSN:                dbFlag,
+				Schema:             schema,
+				EnableLogMining:    enableLogMining,
+				StrataMDPath:       strataMDPath,
+				LLM:                provider,
+				Progress:           inference.NewStderrProgress(os.Stderr),
+				MaxTables:          maxTables,
+				Tables:             tables,
+				SkipProfiling:      skipProfiling,
+				ProfileTimeoutSecs: profileTimeout,
 			}
 
 			ctx := context.Background()
@@ -71,6 +75,14 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLogMining, "enable-log-mining", false, "Enable pg_stat_statements mining")
 	cmd.Flags().StringVar(&strataMDPath, "strata-md", "./strata.md", "Path to strata.md")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-run inference and merge with corrections")
+	cmd.Flags().BoolVar(&skipProfiling, "skip-profiling", false,
+		"Skip Stage 3 sample profiling entirely. Columns will have "+
+			"cardinality_category: unknown and no example values. "+
+			"Useful for remote databases with high latency.")
+	cmd.Flags().IntVar(&profileTimeout, "profile-timeout", 30,
+		"Per-table timeout in seconds for sample profiling. "+
+			"0 = no limit. Tables that exceed the timeout are skipped "+
+			"with cardinality_category: unknown.")
 	cmd.Flags().Int("max-tables", 0, "Abort if the schema has more than this many tables. 0 = no limit.")
 	cmd.Flags().String("tables", "",
 		"Comma-separated list of table names to process. "+

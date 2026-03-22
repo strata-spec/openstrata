@@ -50,6 +50,8 @@ type ColumnResult struct {
 type FinePassResult struct {
 	TableName string         `json:"table_name"`
 	Columns   []ColumnResult `json:"columns"`
+	TokensIn  int            `json:"-"`
+	TokensOut int            `json:"-"`
 }
 
 // RunFinePass executes one LLM call per table to annotate all columns.
@@ -104,12 +106,15 @@ func RunFinePass(
 
 			prompt := buildFinePassPrompt(t, tableProfiles, tr, domain, strataMD)
 			var out FinePassResult
-			if err := llmClient.GenerateStructured(gctx, prompt, finePassSchema, &out); err != nil {
+			gen, err := llmClient.GenerateStructured(gctx, prompt, finePassSchema, &out)
+			if err != nil {
 				log.Printf("fine pass: table %s: %v - skipping", t.Name, err)
 				return nil
 			}
 
 			applyPostProcessing(&out, t)
+			out.TokensIn = gen.TokensIn
+			out.TokensOut = gen.TokensOut
 
 			mu.Lock()
 			results[idx] = out

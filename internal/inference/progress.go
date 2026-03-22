@@ -68,7 +68,7 @@ func (p *StderrProgress) Stage(name string) func(error) {
 func (p *StderrProgress) Item(label string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fmt.Fprintf(p.w, "  → %s\n", label)
+	fmt.Fprintf(p.w, "\r  %-70s", label)
 }
 
 // Info prints "  {msg}".

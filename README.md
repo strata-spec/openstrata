@@ -86,7 +86,7 @@ The more context you provide, the more accurate the output. A one-paragraph `str
 
 | Command | What it does | Key flags |
 |---------|-------------|-----------|
-| `strata init` | Run the full inference pipeline; write `semantic.yaml`, `semantic.json`, `corrections.yaml` | `--db`, `--schema`, `--llm`, `--strata-md`, `--refresh`, `--enable-log-mining`, `--max-tables`, `--tables orders,users` (Process only named tables; FK data still captured for all) |
+| `strata init` | Run the full inference pipeline; write `semantic.yaml`, `semantic.json`, `corrections.yaml` | `--db`, `--schema`, `--llm`, `--strata-md`, `--refresh`, `--enable-log-mining`, `--max-tables`, `--tables orders,users` (Process only named tables; FK data still captured for all), `--skip-profiling` (Skip sample profiling; faster, weaker column context), `--profile-timeout 30` (Per-table profiling timeout in seconds, `0` = no limit) |
 | `strata validate` | Lint `semantic.yaml` against the SMIF spec | `--semantic`, `--corrections` |
 | `strata serve` | Start the MCP server | `--semantic`, `--db`, `--port` |
 | `strata correct` | Write a correction record to `corrections.yaml` | `--semantic`, `--corrections`, `--json` |
@@ -97,7 +97,20 @@ The more context you provide, the more accurate the output. A one-paragraph `str
 
 ## How inference works
 
-Strata connects to Postgres and introspects the schema (tables, columns, constraints, DDL comments). It then profiles each column — computing distinct value counts, null rates, and sampled example values with PII redacted. If `--enable-log-mining` is set, it also mines `pg_stat_statements` for query patterns to derive richer usage profiles and join candidates. The results feed into a two-pass LLM pipeline: a coarse pass infers domain context and table-level grain; a fine pass classifies each column's semantic role, label, and description. Join relationships are resolved from FK constraints, optional log patterns, and canonical joins declared in `strata.md`. The output is validated against the full SMIF rule set before being written to disk.
+Strata connects to Postgres and introspects the schema (tables, columns, constraints, DDL comments). It then profiles each column from a per-table sample scan (1% BERNOULLI sample, capped at 10,000 rows), computing distinct value counts, null rates, and sampled example values with PII redacted. If `--enable-log-mining` is set, it also mines `pg_stat_statements` for query patterns to derive richer usage profiles and join candidates. The results feed into a two-pass LLM pipeline: a coarse pass infers domain context and table-level grain; a fine pass classifies each column's semantic role, label, and description. Join relationships are resolved from FK constraints, optional log patterns, and canonical joins declared in `strata.md`. The output is validated against the full SMIF rule set before being written to disk.
+
+**Performance note:** Stage 3 uses a 1% table sample (capped at
+10,000 rows) to profile columns in a single query per table rather
+than multiple round trips. On remote databases with high latency,
+use `--skip-profiling` to skip Stage 3 entirely, or
+`--profile-timeout 30` (default) to cap per-table scan time.
+
+Strata writes a structured run log to `strata.log` in the output
+directory. To watch progress in detail:
+
+```bash
+tail -f strata.log | jq .
+```
 
 On schemas with more than 20 tables, Strata prints an estimated LLM
 call count before proceeding. Use `--max-tables N` to abort if the

@@ -28,14 +28,14 @@ func NewOpenAIClient() (*OpenAIClient, error) {
 }
 
 // GenerateStructured sends a structured prompt to OpenAI.
-func (c *OpenAIClient) GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) error {
+func (c *OpenAIClient) GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) (GenerateResult, error) {
 	if os.Getenv("OPENAI_API_KEY") == "" {
-		return fmt.Errorf("openai: missing OPENAI_API_KEY")
+		return GenerateResult{}, fmt.Errorf("openai: missing OPENAI_API_KEY")
 	}
 
 	var schemaObj map[string]any
 	if err := json.Unmarshal(schema, &schemaObj); err != nil {
-		return fmt.Errorf("openai: parse json schema: %w", err)
+		return GenerateResult{}, fmt.Errorf("openai: parse json schema: %w", err)
 	}
 
 	request := openai.ChatCompletionNewParams{
@@ -56,12 +56,12 @@ func (c *OpenAIClient) GenerateStructured(ctx context.Context, prompt string, sc
 	for attempt := 0; attempt < 2; attempt++ {
 		resp, err := c.client.Chat.Completions.New(ctx, request)
 		if err != nil {
-			return fmt.Errorf("openai: api call failed: %w", err)
+			return GenerateResult{}, fmt.Errorf("openai: api call failed: %w", err)
 		}
 
 		if len(resp.Choices) == 0 {
 			if attempt == 1 {
-				return fmt.Errorf("openai: malformed structured output: empty choices")
+				return GenerateResult{}, fmt.Errorf("openai: malformed structured output: empty choices")
 			}
 			continue
 		}
@@ -69,22 +69,25 @@ func (c *OpenAIClient) GenerateStructured(ctx context.Context, prompt string, sc
 		payload := resp.Choices[0].Message.Content
 		if payload == "" {
 			if attempt == 1 {
-				return fmt.Errorf("openai: malformed structured output: empty content")
+				return GenerateResult{}, fmt.Errorf("openai: malformed structured output: empty content")
 			}
 			continue
 		}
 
 		if err := json.Unmarshal([]byte(payload), result); err != nil {
 			if attempt == 1 {
-				return fmt.Errorf("openai: malformed structured output: %w", err)
+				return GenerateResult{}, fmt.Errorf("openai: malformed structured output: %w", err)
 			}
 			continue
 		}
 
-		return nil
+		return GenerateResult{
+			TokensIn:  int(resp.Usage.PromptTokens),
+			TokensOut: int(resp.Usage.CompletionTokens),
+		}, nil
 	}
 
-	return fmt.Errorf("openai: malformed structured output")
+	return GenerateResult{}, fmt.Errorf("openai: malformed structured output")
 }
 
 // Provider returns the provider identifier.
