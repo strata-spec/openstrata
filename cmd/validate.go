@@ -20,18 +20,18 @@ func newValidateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			semantic, err := smif.ReadYAML(semanticPath)
 			if err != nil {
-				return fmt.Errorf("read semantic yaml: %w", err)
+				return wrapCommandError("validate", fmt.Errorf("read semantic yaml: %w", err))
 			}
 
 			var corrections *smif.CorrectionsFile
 			if _, err := os.Stat(correctionsPath); err == nil {
 				loaded, loadErr := overlay.LoadCorrections(correctionsPath)
 				if loadErr != nil {
-					return fmt.Errorf("read corrections yaml: %w", loadErr)
+					return wrapCommandError("validate", fmt.Errorf("read corrections yaml: %w", loadErr))
 				}
 				corrections = loaded
 			} else if !os.IsNotExist(err) {
-				return fmt.Errorf("stat corrections yaml: %w", err)
+				return wrapCommandError("validate", fmt.Errorf("stat corrections yaml: %w", err))
 			}
 
 			musts, shoulds := smif.Validate(smif.ValidationDoc{Semantic: semantic, Corrections: corrections})
@@ -44,7 +44,7 @@ func newValidateCmd() *cobra.Command {
 			}
 
 			if len(musts) > 0 {
-				return fmt.Errorf("validation failed with %d MUST violation(s)", len(musts))
+				return wrapCommandError("validate", fmt.Errorf("validation failed with %d MUST violation(s)", len(musts)))
 			}
 
 			fmt.Fprintln(cmd.OutOrStdout(), "✓ semantic.yaml is valid SMIF 0.1.0")

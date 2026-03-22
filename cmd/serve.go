@@ -23,18 +23,18 @@ func newServeCmd() *cobra.Command {
 			if dbFlag != "" {
 				cfg, err := pgconn.ParseConfig(dbFlag)
 				if err != nil {
-					return fmt.Errorf("parse --db: %w", err)
+					return wrapCommandError("serve", fmt.Errorf("parse --db: %w", err))
 				}
 				dbHost := cfg.Host
 				pgxPool, err := postgres.Connect(context.Background(), dbFlag)
 				if err != nil {
-					return fmt.Errorf("connect database: %w", err)
+					return wrapCommandError("serve", fmt.Errorf("connect database: %w", err))
 				}
 				defer pgxPool.Close()
 
 				serverInstance, err := internalmcp.New(semanticPath, correctionsPath, pgxPool)
 				if err != nil {
-					return err
+					return wrapCommandError("serve", err)
 				}
 
 				fmt.Fprintf(cmd.OutOrStdout(), "Strata MCP server starting on port %d\n", port)
@@ -42,19 +42,19 @@ func newServeCmd() *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "  Database: %s [connected]\n", dbHost)
 				fmt.Fprintf(cmd.OutOrStdout(), "  Corrections: %s\n", correctionsPath)
 
-				return serverInstance.Start(port)
+				return wrapCommandError("serve", serverInstance.Start(port))
 			}
 
 			serverInstance, err := internalmcp.New(semanticPath, correctionsPath, nil)
 			if err != nil {
-				return err
+				return wrapCommandError("serve", err)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Strata MCP server starting on port %d\n", port)
 			fmt.Fprintf(cmd.OutOrStdout(), "  Semantic model: %s (%d models)\n", semanticPath, serverInstance.ModelCount())
 			fmt.Fprintln(cmd.OutOrStdout(), "  Database: not connected (run_semantic_sql disabled)")
 			fmt.Fprintf(cmd.OutOrStdout(), "  Corrections: %s\n", correctionsPath)
-			return serverInstance.Start(port)
+			return wrapCommandError("serve", serverInstance.Start(port))
 		},
 	}
 

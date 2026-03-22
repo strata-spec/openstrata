@@ -25,6 +25,7 @@ type Config struct {
 	DSN             string
 	Schema          string
 	MaxTables       int
+	Tables          []string
 	EnableLogMining bool
 	StrataMDPath    string
 	LLM             llm.LLMClient
@@ -72,11 +73,23 @@ func Init(ctx context.Context, cfg Config) error {
 		done(err)
 		return fmt.Errorf("init: stage 2 introspect: %w", err)
 	}
+	totalTables := len(tables)
 	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(tables)))
 	if introspectWarning != "" {
 		cfg.Progress.Info(introspectWarning)
 	}
 	done(nil)
+
+	tables, err = filterTables(tables, cfg.Tables)
+	if err != nil {
+		return fmt.Errorf("init: stage 2 table filter: %w", err)
+	}
+	if len(cfg.Tables) > 0 {
+		cfg.Progress.Info(fmt.Sprintf(
+			"table filter active: processing %d of %d tables (%s)",
+			len(tables), totalTables, strings.Join(cfg.Tables, ", "),
+		))
+	}
 
 	if err := checkTableCount(cfg.Schema, tables, cfg.MaxTables); err != nil {
 		return err
@@ -254,11 +267,23 @@ func Refresh(ctx context.Context, cfg Config) error {
 		done(err)
 		return fmt.Errorf("refresh: stage 2 introspect: %w", err)
 	}
+	totalTables := len(liveTables)
 	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(liveTables)))
 	if introspectWarning != "" {
 		cfg.Progress.Info(introspectWarning)
 	}
 	done(nil)
+
+	liveTables, err = filterTables(liveTables, cfg.Tables)
+	if err != nil {
+		return fmt.Errorf("refresh: stage 2 table filter: %w", err)
+	}
+	if len(cfg.Tables) > 0 {
+		cfg.Progress.Info(fmt.Sprintf(
+			"table filter active: processing %d of %d tables (%s)",
+			len(liveTables), totalTables, strings.Join(cfg.Tables, ", "),
+		))
+	}
 
 	if err := checkTableCount(cfg.Schema, liveTables, cfg.MaxTables); err != nil {
 		return err
@@ -470,6 +495,48 @@ func summarizeFineResults(results []FinePassResult) (totalCols int, flagged int)
 		}
 	}
 	return totalCols, flagged
+}
+
+// filterTables returns only the tables whose names are in the allowlist.
+// If allowlist is empty, returns tables unchanged.
+// Returns an error if any name in allowlist is not found in tables.
+func filterTables(tables []postgres.TableInfo, allowlist []string) ([]postgres.TableInfo, error) {
+	if len(allowlist) == 0 {
+		return tables, nil
+	}
+
+	tableMap := make(map[string]postgres.TableInfo, len(tables))
+	for _, t := range tables {
+		tableMap[strings.ToLower(t.Name)] = t
+	}
+
+	result := make([]postgres.TableInfo, 0, len(allowlist))
+	missing := make([]string, 0)
+	for _, name := range allowlist {
+		lower := strings.ToLower(name)
+		if t, ok := tableMap[lower]; ok {
+			result = append(result, t)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+
+	if len(missing) > 0 {
+		available := make([]string, 0, len(tables))
+		for _, t := range tables {
+			available = append(available, t.Name)
+		}
+		sort.Strings(available)
+		return nil, fmt.Errorf(
+			"--tables: table(s) not found in schema: %s\n"+
+				"  Available tables (%d): %s",
+			strings.Join(missing, ", "),
+			len(available),
+			strings.Join(available, ", "),
+		)
+	}
+
+	return result, nil
 }
 
 func checkTableCount(schema string, tables []postgres.TableInfo, maxTables int) error {

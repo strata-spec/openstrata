@@ -86,7 +86,7 @@ The more context you provide, the more accurate the output. A one-paragraph `str
 
 | Command | What it does | Key flags |
 |---------|-------------|-----------|
-| `strata init` | Run the full inference pipeline; write `semantic.yaml`, `semantic.json`, `corrections.yaml` | `--db`, `--schema`, `--llm`, `--strata-md`, `--refresh`, `--enable-log-mining`, `--max-tables` |
+| `strata init` | Run the full inference pipeline; write `semantic.yaml`, `semantic.json`, `corrections.yaml` | `--db`, `--schema`, `--llm`, `--strata-md`, `--refresh`, `--enable-log-mining`, `--max-tables`, `--tables orders,users` (Process only named tables; FK data still captured for all) |
 | `strata validate` | Lint `semantic.yaml` against the SMIF spec | `--semantic`, `--corrections` |
 | `strata serve` | Start the MCP server | `--semantic`, `--db`, `--port` |
 | `strata correct` | Write a correction record to `corrections.yaml` | `--semantic`, `--corrections`, `--json` |
@@ -102,6 +102,10 @@ Strata connects to Postgres and introspects the schema (tables, columns, constra
 On schemas with more than 20 tables, Strata prints an estimated LLM
 call count before proceeding. Use `--max-tables N` to abort if the
 schema exceeds N tables.
+
+Use `--tables table1,table2` to run inference on a named subset.
+FK relationships to out-of-scope tables are still captured — only
+the LLM annotation is scoped.
 
 `pg_stat_statements` is never accessed without `--enable-log-mining`. It is always opt-in.
 

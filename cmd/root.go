@@ -25,6 +25,7 @@ func newRootCmd() *cobra.Command {
 		Long:    "Strata connects to PostgreSQL, infers a semantic layer, and outputs SMIF documents.",
 		Version: appversion.Version,
 	}
+	cmd.SilenceUsage = true
 
 	cmd.PersistentFlags().StringVar(&dbFlag, "db", "", "Postgres connection string")
 	cmd.PersistentFlags().StringVar(&llmFlag, "llm", "anthropic", "LLM provider: anthropic (default) or openai")

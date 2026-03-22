@@ -25,21 +25,20 @@ func newCorrectCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			semantic, err := smif.ReadYAML(semanticPath)
 			if err != nil {
-				return fmt.Errorf("read semantic yaml: %w", err)
+				return wrapCommandError("correct", fmt.Errorf("read semantic yaml: %w", err))
 			}
 
 			correction, err := buildCorrection(cmd, correctionJSON)
 			if err != nil {
-				return err
+				return wrapCommandError("correct", err)
 			}
 
 			if err := validateCorrectionTarget(semantic, correction); err != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-				return err
+				return wrapCommandError("correct", err)
 			}
 
 			if err := overlay.AppendCorrection(correctionsPath, semantic.SMIFVersion, correction); err != nil {
-				return fmt.Errorf("append correction: %w", err)
+				return wrapCommandError("correct", fmt.Errorf("append correction: %w", err))
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ Correction recorded: %s\n", correction.CorrectionID)

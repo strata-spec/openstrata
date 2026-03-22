@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/strata-spec/openstrata/internal/inference"
@@ -25,10 +26,20 @@ func newInitCmd() *cobra.Command {
 			}
 
 			maxTables, _ := cmd.Flags().GetInt("max-tables")
+			tablesRaw, _ := cmd.Flags().GetString("tables")
+			var tables []string
+			if tablesRaw != "" {
+				for _, t := range strings.Split(tablesRaw, ",") {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						tables = append(tables, t)
+					}
+				}
+			}
 
 			provider, err := inference.ProviderFromString(llmFlag)
 			if err != nil {
-				return err
+				return wrapCommandError("init", err)
 			}
 
 			cfg := inference.Config{
@@ -39,6 +50,7 @@ func newInitCmd() *cobra.Command {
 				LLM:             provider,
 				Progress:        inference.NewStderrProgress(os.Stderr),
 				MaxTables:       maxTables,
+				Tables:          tables,
 			}
 
 			ctx := context.Background()
@@ -48,8 +60,7 @@ func newInitCmd() *cobra.Command {
 				err = inference.Init(ctx, cfg)
 			}
 			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return err
+				return wrapCommandError("init", err)
 			}
 
 			return nil
@@ -61,6 +72,27 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&strataMDPath, "strata-md", "./strata.md", "Path to strata.md")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-run inference and merge with corrections")
 	cmd.Flags().Int("max-tables", 0, "Abort if the schema has more than this many tables. 0 = no limit.")
+	cmd.Flags().String("tables", "",
+		"Comma-separated list of table names to process. "+
+			"When set, only these tables pass through the LLM pipeline. "+
+			"FK introspection runs on the full schema first. "+
+			"Example: --tables orders,users,products")
 
 	return cmd
+}
+
+// isMultilineError returns true if err's message contains a newline.
+func isMultilineError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "\n")
+}
+
+func wrapCommandError(command string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isMultilineError(err) {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return fmt.Errorf("%s failed", command)
+	}
+	return fmt.Errorf("%s failed: %w", command, err)
 }

@@ -287,6 +287,123 @@ func TestLargeSchemaWarning(t *testing.T) {
 	}
 }
 
+func TestFilterTablesAllowlist(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users"},
+		{Name: "orders"},
+		{Name: "products"},
+		{Name: "order_items"},
+	}
+
+	filtered, err := filterTables(tables, []string{"orders", "users"})
+	if err != nil {
+		t.Fatalf("filterTables returned error: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 tables, got %d", len(filtered))
+	}
+	if filtered[0].Name != "orders" || filtered[1].Name != "users" {
+		t.Fatalf("expected [orders users], got [%s %s]", filtered[0].Name, filtered[1].Name)
+	}
+}
+
+func TestFilterTablesEmpty(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users"},
+		{Name: "orders"},
+		{Name: "products"},
+		{Name: "order_items"},
+	}
+
+	filtered, err := filterTables(tables, nil)
+	if err != nil {
+		t.Fatalf("filterTables returned error: %v", err)
+	}
+	if len(filtered) != 4 {
+		t.Fatalf("expected 4 tables, got %d", len(filtered))
+	}
+}
+
+func TestFilterTablesMissing(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users"},
+		{Name: "orders"},
+		{Name: "products"},
+		{Name: "order_items"},
+	}
+
+	_, err := filterTables(tables, []string{"orders", "shipments"})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "shipments") {
+		t.Fatalf("expected missing table name in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Available tables") || !strings.Contains(err.Error(), "users") {
+		t.Fatalf("expected available table list in error, got: %v", err)
+	}
+}
+
+func TestFilterTablesCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{{Name: "Users"}}
+
+	filtered, err := filterTables(tables, []string{"users"})
+	if err != nil {
+		t.Fatalf("filterTables returned error: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Name != "Users" {
+		t.Fatalf("expected case-insensitive table match, got %+v", filtered)
+	}
+}
+
+func TestFilterTablesComposesWithMaxTables(t *testing.T) {
+	t.Parallel()
+
+	tables := makeTablesForCountTests(10)
+	allowlist := []string{"table_0", "table_1", "table_2"}
+
+	filtered, err := filterTables(tables, allowlist)
+	if err != nil {
+		t.Fatalf("filterTables returned error: %v", err)
+	}
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 filtered tables, got %d", len(filtered))
+	}
+
+	err = checkTableCount("public", filtered, 5)
+	if err != nil {
+		t.Fatalf("expected no max-table error, got: %v", err)
+	}
+}
+
+func TestFilterTablesComposesWithMaxTablesAbort(t *testing.T) {
+	t.Parallel()
+
+	tables := makeTablesForCountTests(10)
+	allowlist := []string{"table_0", "table_1", "table_2", "table_3", "table_4", "table_5"}
+
+	filtered, err := filterTables(tables, allowlist)
+	if err != nil {
+		t.Fatalf("filterTables returned error: %v", err)
+	}
+	if len(filtered) != 6 {
+		t.Fatalf("expected 6 filtered tables, got %d", len(filtered))
+	}
+
+	err = checkTableCount("public", filtered, 5)
+	if err == nil {
+		t.Fatalf("expected max-table error, got nil")
+	}
+}
+
 func makeTablesForCountTests(n int) []postgres.TableInfo {
 	tables := make([]postgres.TableInfo, 0, n)
 	for i := 0; i < n; i++ {
