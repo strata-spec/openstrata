@@ -1,6 +1,8 @@
 package inference
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	joinspkg "github.com/strata-spec/openstrata/internal/inference/joins"
 	"github.com/strata-spec/openstrata/internal/postgres"
 	"github.com/strata-spec/openstrata/internal/smif"
+	appversion "github.com/strata-spec/openstrata/internal/version"
 )
 
 func TestAssembleModelEnvelope(t *testing.T) {
@@ -157,7 +160,7 @@ func TestWriteOutputsCreatesThreeFiles(t *testing.T) {
 	model := &smif.SemanticModel{
 		SMIFVersion: "0.1.0",
 		GeneratedAt: "2026-03-20T00:00:00Z",
-		ToolVersion: "strata/0.1.0-dev",
+		ToolVersion: fmt.Sprintf("strata/%s", appversion.Version),
 		Source: smif.Source{
 			Type:            "postgres",
 			HostFingerprint: "deadbeef",
@@ -225,4 +228,59 @@ func TestWriteOutputsCreatesThreeFiles(t *testing.T) {
 	if _, err := smif.ReadYAML(yamlPath); err != nil {
 		t.Fatalf("semantic.yaml not parseable: %v", err)
 	}
+}
+
+func TestMaxTablesEnforced(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Schema: "public", MaxTables: 2, Progress: NoOpProgress{}}
+	err := enforceTableCountLimits(cfg, makeTablesForCountTests(3))
+	if err == nil {
+		t.Fatalf("expected max-tables error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds --max-tables") {
+		t.Fatalf("expected max-tables error, got: %v", err)
+	}
+}
+
+func TestMaxTablesZeroMeansNoLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Schema: "public", MaxTables: 0, Progress: NoOpProgress{}}
+	err := enforceTableCountLimits(cfg, makeTablesForCountTests(100))
+	if err != nil {
+		t.Fatalf("expected no max-tables error when limit is 0, got: %v", err)
+	}
+}
+
+func TestLargeSchemaWarning(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := Config{Schema: "public", MaxTables: 0, Progress: NewStderrProgress(&buf)}
+	err := enforceTableCountLimits(cfg, makeTablesForCountTests(21))
+	if err != nil {
+		t.Fatalf("expected warning only, got error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "⚠") {
+		t.Fatalf("expected warning symbol in output, got: %q", out)
+	}
+	if !strings.Contains(out, "LLM calls") {
+		t.Fatalf("expected LLM calls estimate in output, got: %q", out)
+	}
+}
+
+func makeTablesForCountTests(n int) []postgres.TableInfo {
+	tables := make([]postgres.TableInfo, 0, n)
+	for i := 0; i < n; i++ {
+		tables = append(tables, postgres.TableInfo{
+			Name: fmt.Sprintf("table_%d", i),
+			Columns: []postgres.ColumnInfo{
+				{Name: "id", DataType: "bigint"},
+			},
+		})
+	}
+	return tables
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/strata-spec/openstrata/internal/inference/llm"
 	"github.com/strata-spec/openstrata/internal/postgres"
 	"github.com/strata-spec/openstrata/internal/smif"
+	appversion "github.com/strata-spec/openstrata/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,69 +24,129 @@ import (
 type Config struct {
 	DSN             string
 	Schema          string
+	MaxTables       int
 	EnableLogMining bool
 	StrataMDPath    string
 	LLM             llm.LLMClient
+	Progress        Progress
+	OutputDir       string
 }
 
 // Init runs the full inference pipeline (Stages 1–9) and writes
 // semantic.yaml, semantic.json, and corrections.yaml.
 func Init(ctx context.Context, cfg Config) error {
+	cfg = normalizeConfig(cfg)
+	spinner := NewSpinner(os.Stderr)
+
+	done := cfg.Progress.Stage("Stage 1 — strata.md ingestion")
 	strataMD, strataMDFound, err := Load(cfg.StrataMDPath)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 1 load strata.md: %w", err)
 	}
+	if strataMDFound {
+		cfg.Progress.Info("strata.md found and loaded")
+	} else {
+		cfg.Progress.Info("strata.md not found — continuing without it")
+	}
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 2 — schema extraction")
 	hostFingerprint, err := postgres.Fingerprint(cfg.DSN)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: host fingerprint: %w", err)
 	}
 
 	pool, err := postgres.Connect(ctx, cfg.DSN)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 2 connect: %w", err)
 	}
+	done(nil)
 	defer pool.Close()
 
+	done = cfg.Progress.Stage("Stage 2 — table introspection")
 	tables, err := postgres.Introspect(ctx, pool, cfg.Schema)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 2 introspect: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(tables)))
+	done(nil)
 
+	if err := enforceTableCountLimits(cfg, tables); err != nil {
+		return err
+	}
+
+	done = cfg.Progress.Stage("Stage 3 — sample profiling")
+	stopSpin := spinner.Start("profiling tables...")
 	profiles, err := postgres.Profile(ctx, pool, tables)
+	stopSpin()
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 3 profile: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("%d columns profiled", totalColumnCount(tables)))
+	done(nil)
 
 	var usageProfiles []postgres.UsageProfile
 	if cfg.EnableLogMining {
+		done = cfg.Progress.Stage("Stage 4 — query log mining")
 		usageProfiles, err = postgres.Mine(ctx, pool)
+		done(err)
 		if err != nil {
 			return fmt.Errorf("init: stage 4 log mining: %w", err)
 		}
+	} else {
+		cfg.Progress.Info("Stage 4 — query log mining skipped (--enable-log-mining not set)")
 	}
 
+	done = cfg.Progress.Stage("Stage 5 — LLM domain pass")
+	stopSpin = spinner.Start("calling LLM for domain description...")
 	domainResult, err := RunDomainPass(ctx, cfg.LLM, tables, strataMD)
+	stopSpin()
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 5 domain pass: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("domain: %s", domainResult.Name))
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 5 — LLM table pass")
+	stopSpin = spinner.Start(fmt.Sprintf("annotating %d tables...", len(tables)))
 	tableResults, err := RunTablePass(ctx, cfg.LLM, tables, domainResult, strataMD)
+	stopSpin()
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 5 table pass: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("%d/%d tables annotated", len(tableResults), len(tables)))
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 6 — LLM fine pass")
+	stopSpin = spinner.Start(fmt.Sprintf("annotating columns across %d tables...", len(tables)))
 	fineResults, err := RunFinePass(ctx, cfg.LLM, tables, profiles, tableResults, domainResult, strataMD)
+	stopSpin()
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 6 fine pass: %w", err)
 	}
+	totalCols, flagged := summarizeFineResults(fineResults)
+	cfg.Progress.Info(fmt.Sprintf("%d columns annotated, %d flagged for review", totalCols, flagged))
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 7 — join and grain inference")
 	inferredRelationships, err := InferJoins(tables, usageProfiles, strataMD)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 7 infer joins: %w", err)
 	}
 	grainConfirmations := ConfirmGrains(tables, toCoarseTableResults(tableResults))
+	cfg.Progress.Info(fmt.Sprintf("%d relationships inferred", len(inferredRelationships)))
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 8 — fingerprint and validation")
 	model, err := assembleModel(
 		cfg,
 		toCoarseDomainResult(domainResult),
@@ -100,11 +161,13 @@ func Init(ctx context.Context, cfg Config) error {
 		hostFingerprint,
 	)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 8 assemble model: %w", err)
 	}
 
 	musts, shoulds := smif.Validate(smif.ValidationDoc{Semantic: model})
 	if len(musts) > 0 {
+		done(fmt.Errorf("%d validation errors", len(musts)))
 		lines := make([]string, 0, len(musts))
 		for _, v := range musts {
 			msg := fmt.Sprintf("V-%s: %s - %s", strings.TrimPrefix(v.RuleID, "V-"), v.Path, v.Message)
@@ -117,64 +180,104 @@ func Init(ctx context.Context, cfg Config) error {
 	for _, v := range shoulds {
 		fmt.Fprintf(os.Stderr, "W-%s: %s - %s\n", strings.TrimPrefix(v.RuleID, "W-"), v.Path, v.Message)
 	}
+	done(nil)
 
-	if err := writeOutputs(model, "."); err != nil {
+	done = cfg.Progress.Stage("Stage 9 — writing output files")
+	if err := writeOutputs(model, cfg.OutputDir); err != nil {
+		done(err)
 		return fmt.Errorf("init: stage 9 write outputs: %w", err)
 	}
+	done(nil)
 
 	printSummary(model, musts, shoulds)
-	_ = strataMDFound
 	return nil
 }
 
 // Refresh re-runs inference for changed models only, merging with
 // existing corrections. Implements the algorithm in DESIGN.md Section 9.
 func Refresh(ctx context.Context, cfg Config) error {
-	semanticPath := filepath.Clean("semantic.yaml")
-	correctionsPath := filepath.Clean("corrections.yaml")
+	cfg = normalizeConfig(cfg)
+	spinner := NewSpinner(os.Stderr)
 
+	semanticPath := filepath.Join(cfg.OutputDir, "semantic.yaml")
+	correctionsPath := filepath.Join(cfg.OutputDir, "corrections.yaml")
+
+	done := cfg.Progress.Stage("Stage 0 — loading existing outputs")
 	existing, err := smif.ReadYAML(semanticPath)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: read semantic.yaml: %w", err)
 	}
 
 	corrections, err := readCorrectionsFile(correctionsPath)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: read corrections.yaml: %w", err)
 	}
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 1 — strata.md ingestion")
 	strataMD, strataMDFound, err := Load(cfg.StrataMDPath)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 1 load strata.md: %w", err)
 	}
+	if strataMDFound {
+		cfg.Progress.Info("strata.md found and loaded")
+	} else {
+		cfg.Progress.Info("strata.md not found — continuing without it")
+	}
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 2 — schema extraction")
 	hostFingerprint, err := postgres.Fingerprint(cfg.DSN)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: host fingerprint: %w", err)
 	}
 
 	pool, err := postgres.Connect(ctx, cfg.DSN)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 2 connect: %w", err)
 	}
+	done(nil)
 	defer pool.Close()
 
+	done = cfg.Progress.Stage("Stage 2 — table introspection")
 	liveTables, err := postgres.Introspect(ctx, pool, cfg.Schema)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 2 introspect: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("%d tables found", len(liveTables)))
+	done(nil)
 
+	if err := enforceTableCountLimits(cfg, liveTables); err != nil {
+		return err
+	}
+
+	done = cfg.Progress.Stage("Stage 3 — sample profiling")
+	stopSpin := spinner.Start("profiling tables...")
 	profiles, err := postgres.Profile(ctx, pool, liveTables)
+	stopSpin()
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 3 profile: %w", err)
 	}
+	cfg.Progress.Info(fmt.Sprintf("%d columns profiled", totalColumnCount(liveTables)))
+	done(nil)
 
 	var usageProfiles []postgres.UsageProfile
 	if cfg.EnableLogMining {
+		done = cfg.Progress.Stage("Stage 4 — query log mining")
 		usageProfiles, err = postgres.Mine(ctx, pool)
+		done(err)
 		if err != nil {
 			return fmt.Errorf("refresh: stage 4 log mining: %w", err)
 		}
+	} else {
+		cfg.Progress.Info("Stage 4 — query log mining skipped (--enable-log-mining not set)")
 	}
 
 	existingByName := make(map[string]smif.Model, len(existing.Models))
@@ -194,19 +297,19 @@ func Refresh(ctx context.Context, cfg Config) error {
 		existingModel, ok := existingByName[name]
 		if !ok {
 			changedOrNew = append(changedOrNew, t)
-			fmt.Fprintf(os.Stderr, "warning: model %s is new; inferring\n", t.Name)
+			cfg.Progress.Info(fmt.Sprintf("warning: model %s is new; inferring", t.Name))
 			continue
 		}
 		if existingModel.DDLFingerprint != liveFP {
 			changedOrNew = append(changedOrNew, t)
-			fmt.Fprintf(os.Stderr, "warning: model %s schema has changed; re-inferring\n", t.Name)
+			cfg.Progress.Info(fmt.Sprintf("warning: model %s schema has changed; re-inferring", t.Name))
 		}
 	}
 
 	for _, m := range existing.Models {
 		name := strings.ToLower(strings.TrimSpace(m.Name))
 		if _, ok := liveByName[name]; !ok {
-			fmt.Fprintf(os.Stderr, "warning: model %s is not present in live schema\n", m.Name)
+			cfg.Progress.Info(fmt.Sprintf("warning: model %s is not present in live schema", m.Name))
 		}
 	}
 
@@ -214,29 +317,55 @@ func Refresh(ctx context.Context, cfg Config) error {
 	var tableResults []TableResult
 	var fineResults []FinePassResult
 	if len(changedOrNew) > 0 {
+		done = cfg.Progress.Stage("Stage 5 — LLM domain pass")
+		stopSpin = spinner.Start("calling LLM for domain description...")
 		domainResult, err = RunDomainPass(ctx, cfg.LLM, liveTables, strataMD)
+		stopSpin()
 		if err != nil {
+			done(err)
 			return fmt.Errorf("refresh: stage 5 domain pass: %w", err)
 		}
+		cfg.Progress.Info(fmt.Sprintf("domain: %s", domainResult.Name))
+		done(nil)
 
+		done = cfg.Progress.Stage("Stage 5 — LLM table pass")
+		stopSpin = spinner.Start(fmt.Sprintf("annotating %d tables...", len(changedOrNew)))
 		tableResults, err = RunTablePass(ctx, cfg.LLM, changedOrNew, domainResult, strataMD)
+		stopSpin()
 		if err != nil {
+			done(err)
 			return fmt.Errorf("refresh: stage 5 table pass: %w", err)
 		}
+		cfg.Progress.Info(fmt.Sprintf("%d/%d tables annotated", len(tableResults), len(changedOrNew)))
+		done(nil)
 
+		done = cfg.Progress.Stage("Stage 6 — LLM fine pass")
+		stopSpin = spinner.Start(fmt.Sprintf("annotating columns across %d tables...", len(changedOrNew)))
 		fineResults, err = RunFinePass(ctx, cfg.LLM, changedOrNew, profiles, tableResults, domainResult, strataMD)
+		stopSpin()
 		if err != nil {
+			done(err)
 			return fmt.Errorf("refresh: stage 6 fine pass: %w", err)
 		}
+		totalCols, flagged := summarizeFineResults(fineResults)
+		cfg.Progress.Info(fmt.Sprintf("%d columns annotated, %d flagged for review", totalCols, flagged))
+		done(nil)
+	} else {
+		cfg.Progress.Info("Stage 5 — LLM passes skipped (no changed or new models)")
 	}
 
+	done = cfg.Progress.Stage("Stage 7 — join and grain inference")
 	relationships, err := InferJoins(liveTables, usageProfiles, strataMD)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 7 infer joins: %w", err)
 	}
 
 	grainConfirmations := ConfirmGrains(liveTables, toCoarseTableResults(tableResults))
+	cfg.Progress.Info(fmt.Sprintf("%d relationships inferred", len(relationships)))
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 8 — fingerprint and validation")
 	draft, err := assembleModel(
 		cfg,
 		toCoarseDomainResult(domainResult),
@@ -251,6 +380,7 @@ func Refresh(ctx context.Context, cfg Config) error {
 		hostFingerprint,
 	)
 	if err != nil {
+		done(err)
 		return fmt.Errorf("refresh: stage 8 assemble model: %w", err)
 	}
 
@@ -274,6 +404,7 @@ func Refresh(ctx context.Context, cfg Config) error {
 
 	musts, shoulds := smif.Validate(smif.ValidationDoc{Semantic: draft, Corrections: corrections})
 	if len(musts) > 0 {
+		done(fmt.Errorf("%d validation errors", len(musts)))
 		lines := make([]string, 0, len(musts))
 		for _, v := range musts {
 			msg := fmt.Sprintf("V-%s: %s - %s", strings.TrimPrefix(v.RuleID, "V-"), v.Path, v.Message)
@@ -286,15 +417,73 @@ func Refresh(ctx context.Context, cfg Config) error {
 	for _, v := range shoulds {
 		fmt.Fprintf(os.Stderr, "W-%s: %s - %s\n", strings.TrimPrefix(v.RuleID, "W-"), v.Path, v.Message)
 	}
+	done(nil)
 
+	done = cfg.Progress.Stage("Stage 9 — writing output files")
 	if err := smif.WriteYAML(semanticPath, draft); err != nil {
+		done(err)
 		return fmt.Errorf("refresh: write semantic.yaml: %w", err)
 	}
-	if err := smif.WriteJSON("semantic.json", draft); err != nil {
+	if err := smif.WriteJSON(filepath.Join(cfg.OutputDir, "semantic.json"), draft); err != nil {
+		done(err)
 		return fmt.Errorf("refresh: write semantic.json: %w", err)
 	}
+	done(nil)
 
 	printSummary(draft, musts, shoulds)
+	return nil
+}
+
+func normalizeConfig(cfg Config) Config {
+	if cfg.Progress == nil {
+		cfg.Progress = NoOpProgress{}
+	}
+	if strings.TrimSpace(cfg.OutputDir) == "" {
+		cfg.OutputDir = "."
+	}
+	return cfg
+}
+
+func totalColumnCount(tables []postgres.TableInfo) int {
+	total := 0
+	for _, table := range tables {
+		total += len(table.Columns)
+	}
+	return total
+}
+
+func summarizeFineResults(results []FinePassResult) (totalCols int, flagged int) {
+	for _, result := range results {
+		totalCols += len(result.Columns)
+		for _, col := range result.Columns {
+			if col.NeedsReview {
+				flagged++
+			}
+		}
+	}
+	return totalCols, flagged
+}
+
+func enforceTableCountLimits(cfg Config, tables []postgres.TableInfo) error {
+	if cfg.MaxTables > 0 && len(tables) > cfg.MaxTables {
+		return fmt.Errorf(
+			"schema %q has %d tables, which exceeds --max-tables=%d\n"+
+				"  Hint: use --schema to target a specific schema, or raise "+
+				"--max-tables if you want to proceed.\n"+
+				"  Estimated LLM calls: %d (coarse) + %d (fine) = %d total",
+			cfg.Schema, len(tables), cfg.MaxTables,
+			len(tables)+1, len(tables), len(tables)*2+1,
+		)
+	}
+
+	if len(tables) > 20 {
+		cfg.Progress.Info(fmt.Sprintf(
+			"⚠  %d tables found — this will make %d LLM calls and may take "+
+				"several minutes. Use --max-tables to set a limit.",
+			len(tables), len(tables)*2+1,
+		))
+	}
+
 	return nil
 }
 
@@ -410,12 +599,14 @@ func assembleModel(
 				CardinalityCategory: profile.CardinalityCategory,
 				ExampleValues:       append([]string(nil), profile.ExampleValues...),
 				Difficulty:          difficulty,
+				NeedsReview:         needsReview,
+				HumanReviewed:       false,
 				Provenance: smif.Provenance{
 					SourceType:    sourceType,
 					Confidence:    smif.Default(sourceType, difficulty),
 					HumanReviewed: false,
 				},
-				XProperties: map[string]any{"needs_review": needsReview},
+				XProperties: map[string]any{},
 			}
 
 			if strings.TrimSpace(smifCol.CardinalityCategory) == "" {
@@ -477,7 +668,7 @@ func assembleModel(
 	model := &smif.SemanticModel{
 		SMIFVersion:   "0.1.0",
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
-		ToolVersion:   "strata/0.1.0-dev",
+		ToolVersion:   fmt.Sprintf("strata/%s", appversion.Version),
 		Source:        smif.Source{Type: "postgres", HostFingerprint: hostFingerprint, SchemaNames: []string{cfg.Schema}},
 		Domain:        domainOut,
 		Models:        models,
@@ -522,10 +713,7 @@ func printSummary(model *smif.SemanticModel, musts, shoulds []smif.Violation) {
 	for _, m := range model.Models {
 		columnCount += len(m.Columns)
 		for _, c := range m.Columns {
-			if c.XProperties == nil {
-				continue
-			}
-			if v, ok := c.XProperties["needs_review"].(bool); ok && v {
+			if c.NeedsReview {
 				flagged++
 			}
 		}

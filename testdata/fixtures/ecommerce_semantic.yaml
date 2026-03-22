@@ -1,6 +1,6 @@
 smif_version: "0.1.0"
 generated_at: "2026-03-20T10:00:00Z"
-tool_version: "strata/0.1.0-dev"
+tool_version: "strata/0.1.0-alpha"
 
 source:
   type: postgres

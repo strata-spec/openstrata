@@ -75,6 +75,8 @@ type Column struct {
 	ExampleValues       []string       `json:"example_values,omitempty" yaml:"example_values,omitempty"`
 	UsageProfile        *UsageProfile  `json:"usage_profile,omitempty" yaml:"usage_profile,omitempty"`
 	Difficulty          string         `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
+	NeedsReview         bool           `json:"needs_review,omitempty" yaml:"needs_review,omitempty"`
+	HumanReviewed       bool           `json:"human_reviewed,omitempty" yaml:"human_reviewed,omitempty"`
 	Provenance          Provenance     `json:"provenance" yaml:"provenance"`
 	XProperties         map[string]any `json:"x_properties,omitempty" yaml:"x_properties,omitempty"`
 }

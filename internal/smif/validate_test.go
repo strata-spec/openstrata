@@ -1,8 +1,11 @@
 package smif
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	appversion "github.com/strata-spec/openstrata/internal/version"
 )
 
 func TestValidateMustRules(t *testing.T) {
@@ -265,7 +268,7 @@ func validSemanticModel() *SemanticModel {
 	return &SemanticModel{
 		SMIFVersion: "0.1.0",
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		ToolVersion: "0.1.0-dev",
+		ToolVersion: fmt.Sprintf("strata/%s", appversion.Version),
 		Source: Source{
 			Type:            "postgres",
 			HostFingerprint: "abc123",

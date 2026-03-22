@@ -960,8 +960,8 @@ func checkW003(doc *ValidationDoc) []Violation {
 			if c.Difficulty != "ambiguous" && c.Difficulty != "domain_dependent" {
 				continue
 			}
-			if !c.Provenance.HumanReviewed {
-				out = addViolation(out, "W-003", TierShould, columnPath(m.ModelID, c.Name, "provenance.human_reviewed"), "ambiguous/domain-dependent columns should be human_reviewed=true")
+			if !c.HumanReviewed && !c.NeedsReview {
+				out = addViolation(out, "W-003", TierShould, columnPath(m.ModelID, c.Name, "human_reviewed"), "ambiguous/domain-dependent columns should be human_reviewed=true")
 			}
 		}
 	}
@@ -975,7 +975,7 @@ func checkW004(doc *ValidationDoc) []Violation {
 	var out []Violation
 	for _, m := range doc.Semantic.Models {
 		for _, c := range m.Columns {
-			if c.Provenance.Confidence <= 0.4 && !c.Provenance.HumanReviewed {
+			if c.Provenance.Confidence <= 0.4 && !c.HumanReviewed && !c.NeedsReview {
 				out = addViolation(out, "W-004", TierShould, columnPath(m.ModelID, c.Name, "provenance"), "low-confidence unreviewed columns should be flagged for review")
 			}
 		}

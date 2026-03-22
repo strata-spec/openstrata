@@ -24,6 +24,8 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("--db is required")
 			}
 
+			maxTables, _ := cmd.Flags().GetInt("max-tables")
+
 			provider, err := inference.ProviderFromString(llmFlag)
 			if err != nil {
 				return err
@@ -35,6 +37,8 @@ func newInitCmd() *cobra.Command {
 				EnableLogMining: enableLogMining,
 				StrataMDPath:    strataMDPath,
 				LLM:             provider,
+				Progress:        inference.NewStderrProgress(os.Stderr),
+				MaxTables:       maxTables,
 			}
 
 			ctx := context.Background()
@@ -56,6 +60,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&enableLogMining, "enable-log-mining", false, "Enable pg_stat_statements mining")
 	cmd.Flags().StringVar(&strataMDPath, "strata-md", "./strata.md", "Path to strata.md")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-run inference and merge with corrections")
+	cmd.Flags().Int("max-tables", 0, "Abort if the schema has more than this many tables. 0 = no limit.")
 
 	return cmd
 }

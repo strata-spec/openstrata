@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	appversion "github.com/strata-spec/openstrata/internal/version"
 )
 
 var (
@@ -12,9 +13,6 @@ var (
 	dbFlag  string
 	llmFlag string
 )
-
-// Version is the CLI version string.
-const Version = "0.1.0-dev"
 
 // rootCmd represents the base command when called without any subcommands.
 var rootCmd = newRootCmd()
@@ -25,7 +23,7 @@ func newRootCmd() *cobra.Command {
 		Use:     "strata",
 		Short:   "Strata - PostgreSQL semantic layer inference and serving",
 		Long:    "Strata connects to PostgreSQL, infers a semantic layer, and outputs SMIF documents.",
-		Version: Version,
+		Version: appversion.Version,
 	}
 
 	cmd.PersistentFlags().StringVar(&dbFlag, "db", "", "Postgres connection string")
