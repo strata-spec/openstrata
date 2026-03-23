@@ -3,9 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
+	"github.com/strata-spec/openstrata/internal/localconfig"
 	internalmcp "github.com/strata-spec/openstrata/internal/mcp"
 	"github.com/strata-spec/openstrata/internal/postgres"
 )
@@ -20,13 +23,22 @@ func newServeCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the MCP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if dbFlag != "" {
-				cfg, err := pgconn.ParseConfig(dbFlag)
+			dbDSN, _ := cmd.Flags().GetString("db")
+			if dbDSN == "" {
+				lc, err := localconfig.Read(filepath.Dir(semanticPath))
+				if err == nil && lc != nil && lc.DB != "" {
+					dbDSN = lc.DB
+					fmt.Fprintf(os.Stderr, "  Using DB from .strata\n")
+				}
+			}
+
+			if dbDSN != "" {
+				cfg, err := pgconn.ParseConfig(dbDSN)
 				if err != nil {
 					return wrapCommandError("serve", fmt.Errorf("parse --db: %w", err))
 				}
 				dbHost := cfg.Host
-				pgxPool, err := postgres.Connect(context.Background(), dbFlag)
+				pgxPool, err := postgres.Connect(context.Background(), dbDSN)
 				if err != nil {
 					return wrapCommandError("serve", fmt.Errorf("connect database: %w", err))
 				}

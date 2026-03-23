@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/strata-spec/openstrata/internal/inference"
+	"github.com/strata-spec/openstrata/internal/localconfig"
 )
 
 // newInitCmd creates the strata init command.
@@ -26,6 +27,8 @@ func newInitCmd() *cobra.Command {
 			if dbFlag == "" {
 				return fmt.Errorf("--db is required")
 			}
+
+			outputDir := "."
 
 			maxTables, _ := cmd.Flags().GetInt("max-tables")
 			tablesRaw, _ := cmd.Flags().GetString("tables")
@@ -65,6 +68,17 @@ func newInitCmd() *cobra.Command {
 			}
 			if err != nil {
 				return wrapCommandError("init", err)
+			}
+
+			lc := localconfig.Config{
+				DB:     dbFlag,
+				Schema: schema,
+			}
+			if err := localconfig.Write(outputDir, lc); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠  could not write .strata: %v\n", err)
+			}
+			if err := localconfig.EnsureGitignored(outputDir); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠  could not update .gitignore: %v\n", err)
 			}
 
 			return nil
