@@ -366,63 +366,89 @@ func resolveLogJoinTarget(
 	return "", "", false
 }
 
-func markPreferred(relationships []InferredRelationship) {
-	// Step 4a: reset all preferred flags before assigning one winner per model pair.
-	for i := range relationships {
-		relationships[i].Preferred = false
+// deduplicateRelationships is Step 4a: keep the best relationship per
+// four-part column key (from_model, from_column, to_model, to_column).
+// Selection uses confidence as the primary criterion and source trust order
+// as a tiebreaker. All output relationships have Preferred reset to false —
+// markPreferred (Step 4b) assigns Preferred=true to winners.
+func deduplicateRelationships(rels []InferredRelationship) []InferredRelationship {
+	type relKey struct {
+		fromModel, fromColumn, toModel, toColumn string
+	}
+	trustOrder := map[string]int{
+		sourceUserDefined:      4,
+		sourceStrataMD:         3,
+		sourceSchemaConstraint: 2,
+		sourceLogInferred:      1,
 	}
 
-	// Step 4b: assign preferred by model pair using confidence then trust order.
-	type modelPair struct {
-		from string
-		to   string
-	}
-	preferred := make(map[modelPair]int)
-	for i, r := range relationships {
-		pair := modelPair{from: normalizePart(r.FromModel), to: normalizePart(r.ToModel)}
-		existingIdx, ok := preferred[pair]
+	seen := make(map[relKey]InferredRelationship, len(rels))
+	for _, r := range rels {
+		k := relKey{
+			fromModel:  strings.ToLower(r.FromModel),
+			fromColumn: strings.ToLower(r.FromColumn),
+			toModel:    strings.ToLower(r.ToModel),
+			toColumn:   strings.ToLower(r.ToColumn),
+		}
+		existing, ok := seen[k]
 		if !ok {
-			preferred[pair] = i
-			continue
-		}
-
-		existing := relationships[existingIdx]
-		if betterPreferredCandidate(r, existing) {
-			preferred[pair] = i
+			seen[k] = r
+		} else if r.Confidence > existing.Confidence ||
+			(r.Confidence == existing.Confidence &&
+				trustOrder[r.SourceType] > trustOrder[existing.SourceType]) {
+			seen[k] = r
 		}
 	}
 
-	for _, idx := range preferred {
+	// Reset Preferred=false on every output relationship.
+	// markPreferred (Step 4b) assigns Preferred=true on winners.
+	deduped := make([]InferredRelationship, 0, len(seen))
+	for _, r := range seen {
+		r.Preferred = false
+		deduped = append(deduped, r)
+	}
+	return deduped
+}
+
+// markPreferred is Step 4b: assign Preferred=true to exactly one relationship
+// per (from_model, to_model) model pair — the one with the highest confidence
+// (source trust order as tiebreaker). Step 4a (deduplicateRelationships) has
+// already reset all Preferred flags to false before this is called.
+func markPreferred(relationships []InferredRelationship) {
+	type modelPair struct {
+		fromModel, toModel string
+	}
+	trustOrder := map[string]int{
+		sourceUserDefined:      4,
+		sourceStrataMD:         3,
+		sourceSchemaConstraint: 2,
+		sourceLogInferred:      1,
+	}
+
+	// First pass: find the best relationship index per model pair.
+	// The key is sorted so A→B and B→A use the same key, matching checkV022.
+	bestIdx := make(map[modelPair]int)
+	for i, r := range relationships {
+		pairSlice := []string{strings.ToLower(r.FromModel), strings.ToLower(r.ToModel)}
+		sort.Strings(pairSlice)
+		pair := modelPair{fromModel: pairSlice[0], toModel: pairSlice[1]}
+		existingIdx, ok := bestIdx[pair]
+		if !ok {
+			bestIdx[pair] = i
+		} else {
+			existing := relationships[existingIdx]
+			if r.Confidence > existing.Confidence ||
+				(r.Confidence == existing.Confidence &&
+					trustOrder[r.SourceType] > trustOrder[existing.SourceType]) {
+				bestIdx[pair] = i
+			}
+		}
+	}
+
+	// Second pass: set preferred=true only on winners.
+	for _, idx := range bestIdx {
 		relationships[idx].Preferred = true
 	}
-}
-
-func betterPreferredCandidate(candidate, current InferredRelationship) bool {
-	if candidate.Confidence != current.Confidence {
-		return candidate.Confidence > current.Confidence
-	}
-	return sourceTrust(candidate.SourceType) > sourceTrust(current.SourceType)
-}
-
-func addByTrust(relByPair map[string]InferredRelationship, rel InferredRelationship) {
-	k := pairKey(rel.FromModel, rel.FromColumn, rel.ToModel, rel.ToColumn)
-	existing, ok := relByPair[k]
-	if !ok || sourceTrust(rel.SourceType) > sourceTrust(existing.SourceType) {
-		relByPair[k] = rel
-	}
-}
-
-func deduplicateRelationships(rels []InferredRelationship) []InferredRelationship {
-	relByPair := make(map[string]InferredRelationship, len(rels))
-	for _, rel := range rels {
-		addByTrust(relByPair, rel)
-	}
-
-	out := make([]InferredRelationship, 0, len(relByPair))
-	for _, rel := range relByPair {
-		out = append(out, rel)
-	}
-	return out
 }
 
 func filterOutOfScopeRelationships(
@@ -445,21 +471,6 @@ func filterOutOfScopeRelationships(
 		}
 	}
 	return result
-}
-
-func sourceTrust(sourceType string) int {
-	switch sourceType {
-	case sourceUserDefined:
-		return 4
-	case sourceStrataMD:
-		return 3
-	case sourceSchemaConstraint:
-		return 2
-	case sourceLogInferred:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func pairKey(fromModel, fromColumn, toModel, toColumn string) string {

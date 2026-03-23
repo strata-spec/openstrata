@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -162,7 +163,11 @@ func TestCanonicalJoinsGetStrataMDSourceType(t *testing.T) {
 	}
 }
 
-func TestStrataMDWinsOverSchemaConstraint(t *testing.T) {
+// TestSchemaConstraintWinsOverStrataMDOnConfidence verifies that when the same
+// four-part join (from_model, from_column, to_model, to_column) appears as both
+// a schema_constraint (confidence 1.0) and a strata_md join (confidence 0.95),
+// dedup keeps the schema_constraint because confidence is the primary criterion.
+func TestSchemaConstraintWinsOverStrataMDOnConfidence(t *testing.T) {
 	t.Parallel()
 
 	tables := []postgres.TableInfo{
@@ -182,10 +187,94 @@ func TestStrataMDWinsOverSchemaConstraint(t *testing.T) {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
 	if len(rels) != 1 {
-		t.Fatalf("expected 1 relationship, got %d", len(rels))
+		t.Fatalf("expected 1 relationship after dedup (same four-part key), got %d", len(rels))
 	}
-	if rels[0].SourceType != sourceStrataMD {
-		t.Fatalf("expected strata_md to override FK, got %s", rels[0].SourceType)
+	// schema_constraint (1.0) beats strata_md (0.95) on confidence.
+	if rels[0].SourceType != sourceSchemaConstraint {
+		t.Fatalf("expected schema_constraint, got %s", rels[0].SourceType)
+	}
+	// Regression pin: if logic reverts to trust-first, strata_md (trust=3) beats
+	// schema_constraint (trust=2) and returns Confidence=0.95, failing here.
+	if rels[0].Confidence != 1.0 {
+		t.Fatalf("expected confidence 1.0 (schema_constraint wins on confidence), got %f", rels[0].Confidence)
+	}
+}
+
+func TestPreferredFlagSameModelPairDifferentColumns(t *testing.T) {
+	t.Parallel()
+
+	// Table a references b via two distinct column pairs.
+	// Both relationships survive dedup (different four-part keys).
+	// Exactly one must be preferred.
+	tables := []postgres.TableInfo{
+		{Name: "b", Columns: []postgres.ColumnInfo{{Name: "a_id"}, {Name: "a_code"}}},
+		{
+			Name:    "a",
+			Columns: []postgres.ColumnInfo{{Name: "id"}, {Name: "code"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"id"}, ToTable: "b", ToColumns: []string{"a_id"}},
+				{FromColumns: []string{"code"}, ToTable: "b", ToColumns: []string{"a_code"}},
+			},
+		},
+	}
+
+	rels, _, err := InferJoins(tables, nil, "", nil)
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+
+	var ab []InferredRelationship
+	for _, r := range rels {
+		if r.FromModel == "a" && r.ToModel == "b" {
+			ab = append(ab, r)
+		}
+	}
+	if len(ab) != 2 {
+		t.Fatalf("expected 2 relationships for a→b (different column pairs), got %d", len(ab))
+	}
+
+	preferredCount := 0
+	for _, r := range ab {
+		if r.Preferred {
+			preferredCount++
+		}
+	}
+	if preferredCount != 1 {
+		t.Fatalf("expected exactly 1 preferred for a→b, got %d", preferredCount)
+	}
+}
+
+func TestPreferredFlagStrataMDAndFKSamePair(t *testing.T) {
+	t.Parallel()
+
+	// Same four-part key from both schema_constraint (confidence 1.0) and
+	// strata_md (confidence 0.95). Dedup must keep exactly one.
+	// Winner: schema_constraint, because confidence is the primary criterion
+	// (1.0 > 0.95) even though strata_md has higher source trust.
+	tables := []postgres.TableInfo{
+		{Name: "b", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{
+			Name:    "a",
+			Columns: []postgres.ColumnInfo{{Name: "b_id"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"b_id"}, ToTable: "b", ToColumns: []string{"id"}},
+			},
+		},
+	}
+	strataMD := "## Canonical Joins\na.b_id = b.id\n"
+
+	rels, _, err := InferJoins(tables, nil, strataMD, nil)
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("expected 1 relationship after dedup (same four-part key), got %d", len(rels))
+	}
+	if rels[0].SourceType != sourceSchemaConstraint {
+		t.Fatalf("expected schema_constraint to win on confidence (1.0 > 0.95), got %s", rels[0].SourceType)
+	}
+	if !rels[0].Preferred {
+		t.Fatalf("expected the sole relationship to be preferred")
 	}
 }
 
@@ -413,5 +502,80 @@ func TestPreferredFlagResetBeforeAssignment(t *testing.T) {
 	}
 	if preferredCount != 1 {
 		t.Fatalf("expected at most one preferred relationship for orders->users, got %d", preferredCount)
+	}
+}
+
+// TestPreferredFlagBidirectionalPair verifies that A→B and B→A are treated as
+// the same model pair by markPreferred, matching the unordered key used by checkV022.
+// Only one of the two directions should get Preferred=true.
+func TestPreferredFlagBidirectionalPair(t *testing.T) {
+	t.Parallel()
+
+	rels := []InferredRelationship{
+		{
+			FromModel:  "orders",
+			ToModel:    "users",
+			FromColumn: "user_id",
+			ToColumn:   "id",
+			SourceType: sourceSchemaConstraint,
+			Confidence: 1.0,
+			Preferred:  false,
+		},
+		{
+			FromModel:  "users",
+			ToModel:    "orders",
+			FromColumn: "id",
+			ToColumn:   "user_id",
+			SourceType: sourceLogInferred,
+			Confidence: 0.7,
+			Preferred:  false,
+		},
+	}
+
+	markPreferred(rels)
+
+	preferredCount := 0
+	for _, r := range rels {
+		if r.Preferred {
+			preferredCount++
+		}
+	}
+	if preferredCount != 1 {
+		t.Fatalf("expected exactly 1 preferred relationship across bidirectional pair, got %d", preferredCount)
+	}
+
+	// The schema_constraint direction (higher confidence) must win.
+	pairKey := func(from, to string) string {
+		parts := []string{strings.ToLower(from), strings.ToLower(to)}
+		sort.Strings(parts)
+		return parts[0] + "|" + parts[1]
+	}
+	winner := ""
+	for _, r := range rels {
+		if r.Preferred {
+			winner = pairKey(r.FromModel, r.ToModel)
+		}
+	}
+	if winner == "" {
+		t.Fatal("no preferred relationship found")
+	}
+	// Sanity: the winner key must equal the loser key (same unordered pair).
+	for _, r := range rels {
+		if !r.Preferred {
+			loserKey := pairKey(r.FromModel, r.ToModel)
+			if loserKey != winner {
+				t.Errorf("winner key %q != loser key %q — pairs are not treated as the same model pair", winner, loserKey)
+			}
+		}
+	}
+
+	// The schema_constraint relationship must be preferred (confidence 1.0 beats 0.7).
+	for _, r := range rels {
+		if r.SourceType == sourceSchemaConstraint && !r.Preferred {
+			t.Error("expected schema_constraint direction to be preferred (higher confidence), but it is not")
+		}
+		if r.SourceType == sourceLogInferred && r.Preferred {
+			t.Error("log_inferred direction should NOT be preferred (lower confidence), but it is")
+		}
 	}
 }
