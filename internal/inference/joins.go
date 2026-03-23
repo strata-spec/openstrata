@@ -15,6 +15,7 @@ const highConfidenceJoinCount = 10
 
 const (
 	sourceUserDefined      = "user_defined"
+	sourceStrataMD         = "strata_md"
 	sourceSchemaConstraint = "schema_constraint"
 	sourceLogInferred      = "log_inferred"
 )
@@ -46,12 +47,14 @@ type GrainConfirmation struct {
 }
 
 // InferJoins produces relationships from all available sources.
-// profiles and usageProfiles are both optional (may be nil/empty).
+// usageProfiles is optional (may be nil/empty).
+// selectedTables is optional; when set, relationships to out-of-scope to_models are dropped.
 func InferJoins(
 	tables []postgres.TableInfo,
 	usageProfiles []postgres.UsageProfile,
 	strataMD string,
-) ([]InferredRelationship, error) {
+	selectedTables []string,
+) ([]InferredRelationship, int, error) {
 	tableByName := make(map[string]postgres.TableInfo, len(tables))
 	columnsByTable := make(map[string]map[string]struct{}, len(tables))
 	for _, t := range tables {
@@ -65,7 +68,7 @@ func InferJoins(
 		columnsByTable[tableName] = colSet
 	}
 
-	relByPair := make(map[string]InferredRelationship)
+	rels := make([]InferredRelationship, 0)
 	schemaCovered := make(map[string]struct{})
 
 	for _, t := range tables {
@@ -105,7 +108,7 @@ func InferJoins(
 				SourceType:       sourceSchemaConstraint,
 				Confidence:       1.0,
 			}
-			addByTrust(relByPair, rel)
+			rels = append(rels, rel)
 		}
 	}
 
@@ -153,7 +156,7 @@ func InferJoins(
 			SourceType:       sourceLogInferred,
 			Confidence:       conf,
 		}
-		addByTrust(relByPair, rel)
+		rels = append(rels, rel)
 	}
 
 	for _, parsed := range parseCanonicalJoins(strataMD) {
@@ -176,16 +179,15 @@ func InferJoins(
 			ToColumn:         toColumn,
 			RelationshipType: "many_to_one",
 			JoinCondition:    fmt.Sprintf("%s.%s = %s.%s", fromModel, fromColumn, toModel, toColumn),
-			SourceType:       sourceUserDefined,
-			Confidence:       1.0,
+			SourceType:       sourceStrataMD,
+			Confidence:       0.95,
 		}
-		addByTrust(relByPair, rel)
+		rels = append(rels, rel)
 	}
 
-	relationships := make([]InferredRelationship, 0, len(relByPair))
-	for _, rel := range relByPair {
-		relationships = append(relationships, rel)
-	}
+	filtered := filterOutOfScopeRelationships(rels, selectedTables)
+	droppedCount := len(rels) - len(filtered)
+	relationships := deduplicateRelationships(filtered)
 
 	sort.Slice(relationships, func(i, j int) bool {
 		if relationships[i].FromModel != relationships[j].FromModel {
@@ -202,7 +204,7 @@ func InferJoins(
 
 	markPreferred(relationships)
 
-	return relationships, nil
+	return relationships, droppedCount, nil
 }
 
 // ConfirmGrains cross-checks Stage 5 grain statements against PK structure.
@@ -365,17 +367,32 @@ func resolveLogJoinTarget(
 }
 
 func markPreferred(relationships []InferredRelationship) {
-	bestIdx := make(map[string]int)
+	// Step 4a: reset all preferred flags before assigning one winner per model pair.
 	for i := range relationships {
 		relationships[i].Preferred = false
-		k := relationships[i].FromModel + "->" + relationships[i].ToModel
-		current, ok := bestIdx[k]
-		if !ok || betterPreferredCandidate(relationships[i], relationships[current]) {
-			bestIdx[k] = i
+	}
+
+	// Step 4b: assign preferred by model pair using confidence then trust order.
+	type modelPair struct {
+		from string
+		to   string
+	}
+	preferred := make(map[modelPair]int)
+	for i, r := range relationships {
+		pair := modelPair{from: normalizePart(r.FromModel), to: normalizePart(r.ToModel)}
+		existingIdx, ok := preferred[pair]
+		if !ok {
+			preferred[pair] = i
+			continue
+		}
+
+		existing := relationships[existingIdx]
+		if betterPreferredCandidate(r, existing) {
+			preferred[pair] = i
 		}
 	}
 
-	for _, idx := range bestIdx {
+	for _, idx := range preferred {
 		relationships[idx].Preferred = true
 	}
 }
@@ -395,9 +412,46 @@ func addByTrust(relByPair map[string]InferredRelationship, rel InferredRelations
 	}
 }
 
+func deduplicateRelationships(rels []InferredRelationship) []InferredRelationship {
+	relByPair := make(map[string]InferredRelationship, len(rels))
+	for _, rel := range rels {
+		addByTrust(relByPair, rel)
+	}
+
+	out := make([]InferredRelationship, 0, len(relByPair))
+	for _, rel := range relByPair {
+		out = append(out, rel)
+	}
+	return out
+}
+
+func filterOutOfScopeRelationships(
+	rels []InferredRelationship,
+	selectedTables []string,
+) []InferredRelationship {
+	if len(selectedTables) == 0 {
+		return rels
+	}
+
+	selected := make(map[string]bool, len(selectedTables))
+	for _, t := range selectedTables {
+		selected[strings.ToLower(t)] = true
+	}
+
+	result := make([]InferredRelationship, 0, len(rels))
+	for _, r := range rels {
+		if selected[strings.ToLower(r.ToModel)] {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
 func sourceTrust(sourceType string) int {
 	switch sourceType {
 	case sourceUserDefined:
+		return 4
+	case sourceStrataMD:
 		return 3
 	case sourceSchemaConstraint:
 		return 2

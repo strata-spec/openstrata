@@ -231,10 +231,13 @@ func Init(ctx context.Context, cfg Config) error {
 	done(nil)
 
 	done = cfg.Progress.Stage("Stage 7 — join and grain inference")
-	inferredRelationships, err := InferJoins(tables, usageProfiles, strataMD)
+	inferredRelationships, droppedCount, err := InferJoins(tables, usageProfiles, strataMD, cfg.Tables)
 	if err != nil {
 		done(err)
 		return fmt.Errorf("init: stage 7 infer joins: %w", err)
+	}
+	if droppedCount > 0 {
+		cfg.Progress.Info(fmt.Sprintf("⚠  %d relationships to out-of-scope models dropped (use full schema run to capture all relationships)", droppedCount))
 	}
 	grainConfirmations := ConfirmGrains(tables, toCoarseTableResults(tableResults))
 	cfg.Progress.Info(fmt.Sprintf("%d relationships inferred", len(inferredRelationships)))
@@ -532,10 +535,13 @@ func Refresh(ctx context.Context, cfg Config) error {
 	}
 
 	done = cfg.Progress.Stage("Stage 7 — join and grain inference")
-	relationships, err := InferJoins(liveTables, usageProfiles, strataMD)
+	relationships, droppedCount, err := InferJoins(liveTables, usageProfiles, strataMD, cfg.Tables)
 	if err != nil {
 		done(err)
 		return fmt.Errorf("refresh: stage 7 infer joins: %w", err)
+	}
+	if droppedCount > 0 {
+		cfg.Progress.Info(fmt.Sprintf("⚠  %d relationships to out-of-scope models dropped (use full schema run to capture all relationships)", droppedCount))
 	}
 
 	grainConfirmations := ConfirmGrains(liveTables, toCoarseTableResults(tableResults))

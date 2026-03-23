@@ -733,12 +733,12 @@ func checkV029(doc *ValidationDoc) []Violation {
 func checkV030(doc *ValidationDoc) []Violation {
 	allowed := map[string]struct{}{
 		"schema_constraint": {}, "ddl_comment": {}, "log_inferred": {}, "llm_inferred": {},
-		"user_defined": {}, "catalog_import": {}, "code_extracted": {},
+		"user_defined": {}, "catalog_import": {}, "code_extracted": {}, "strata_md": {},
 	}
 	var out []Violation
 	for _, item := range listProvenance(doc) {
 		if _, ok := allowed[item.p.SourceType]; !ok {
-			out = addViolation(out, "V-030", TierMust, item.path+".source_type", "source_type must be one of schema_constraint|ddl_comment|log_inferred|llm_inferred|user_defined|catalog_import|code_extracted")
+			out = addViolation(out, "V-030", TierMust, item.path+".source_type", "source_type must be one of schema_constraint|ddl_comment|log_inferred|llm_inferred|user_defined|catalog_import|code_extracted|strata_md")
 		}
 	}
 	return out

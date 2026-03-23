@@ -242,6 +242,18 @@ func TestValidateShouldRules(t *testing.T) {
 	}
 }
 
+func TestV030AcceptsStrataMD(t *testing.T) {
+	t.Parallel()
+
+	m := validSemanticModel()
+	m.Relationships[0].Provenance.SourceType = "strata_md"
+
+	musts, _ := Validate(ValidationDoc{Semantic: m})
+	if hasViolation(musts, "V-030") {
+		t.Fatalf("expected V-030 to accept strata_md source_type")
+	}
+}
+
 func hasViolation(violations []Violation, id string) bool {
 	for _, v := range violations {
 		if v.RuleID == id {

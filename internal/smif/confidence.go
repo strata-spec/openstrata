@@ -8,6 +8,8 @@ func Default(sourceType string, difficulty string) float64 {
 		return 1.0
 	case "ddl_comment":
 		return 0.95
+	case "strata_md":
+		return 0.95
 	case "catalog_import":
 		return 0.85
 	case "code_extracted":

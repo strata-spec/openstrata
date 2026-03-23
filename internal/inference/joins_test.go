@@ -37,7 +37,7 @@ func TestInferJoinsFromFK(t *testing.T) {
 		},
 	}
 
-	rels, err := InferJoins(tables, nil, "")
+	rels, _, err := InferJoins(tables, nil, "", nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestInferJoinsDeduplication(t *testing.T) {
 		{TableName: "orders", ColumnName: "user_id", JoinCount: 15},
 	}
 
-	rels, err := InferJoins(tables, usage, "")
+	rels, _, err := InferJoins(tables, usage, "", nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestInferJoinsLogInferred(t *testing.T) {
 		{TableName: "order_items", ColumnName: "product_id", JoinCount: 12},
 	}
 
-	rels, err := InferJoins(tables, usage, "")
+	rels, _, err := InferJoins(tables, usage, "", nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestInferJoinsLogInferred(t *testing.T) {
 	}
 }
 
-func TestInferJoinsStrataMD(t *testing.T) {
+func TestCanonicalJoinsGetStrataMDSourceType(t *testing.T) {
 	t.Parallel()
 
 	tables := []postgres.TableInfo{
@@ -144,22 +144,25 @@ func TestInferJoinsStrataMD(t *testing.T) {
 	}
 
 	strataMD := "## Canonical Joins\nshipments.warehouse_id = warehouses.id\n"
-	rels, err := InferJoins(tables, nil, strataMD)
+	rels, _, err := InferJoins(tables, nil, strataMD, nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
 	if len(rels) != 1 {
 		t.Fatalf("expected 1 relationship, got %d", len(rels))
 	}
-	if rels[0].SourceType != sourceUserDefined {
-		t.Fatalf("expected user_defined source, got %s", rels[0].SourceType)
+	if rels[0].SourceType != sourceStrataMD {
+		t.Fatalf("expected strata_md source, got %s", rels[0].SourceType)
 	}
-	if rels[0].Confidence != 1.0 {
-		t.Fatalf("expected confidence=1.0, got %v", rels[0].Confidence)
+	if rels[0].Confidence != 0.95 {
+		t.Fatalf("expected confidence=0.95, got %v", rels[0].Confidence)
+	}
+	if rels[0].SourceType == sourceUserDefined {
+		t.Fatalf("canonical joins must not use user_defined provenance")
 	}
 }
 
-func TestInferJoinsStrataMDOverridesFK(t *testing.T) {
+func TestStrataMDWinsOverSchemaConstraint(t *testing.T) {
 	t.Parallel()
 
 	tables := []postgres.TableInfo{
@@ -174,15 +177,104 @@ func TestInferJoinsStrataMDOverridesFK(t *testing.T) {
 	}
 	strataMD := "## canonical joins\norders.user_id = users.id\n"
 
-	rels, err := InferJoins(tables, nil, strataMD)
+	rels, _, err := InferJoins(tables, nil, strataMD, nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
 	if len(rels) != 1 {
 		t.Fatalf("expected 1 relationship, got %d", len(rels))
 	}
-	if rels[0].SourceType != sourceUserDefined {
-		t.Fatalf("expected user_defined to override FK, got %s", rels[0].SourceType)
+	if rels[0].SourceType != sourceStrataMD {
+		t.Fatalf("expected strata_md to override FK, got %s", rels[0].SourceType)
+	}
+}
+
+func TestInferJoinsFiltersOutOfScopeModels(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{Name: "products", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{
+			Name:    "orders",
+			Columns: []postgres.ColumnInfo{{Name: "user_id"}, {Name: "product_id"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"user_id"}, ToTable: "users", ToColumns: []string{"id"}},
+				{FromColumns: []string{"product_id"}, ToTable: "products", ToColumns: []string{"id"}},
+			},
+		},
+	}
+
+	rels, dropped, err := InferJoins(tables, nil, "", []string{"orders", "users"})
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("expected dropped_count=1, got %d", dropped)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("expected 1 in-scope relationship, got %d", len(rels))
+	}
+	if rels[0].ToModel != "users" {
+		t.Fatalf("expected retained relationship to users, got to_model=%s", rels[0].ToModel)
+	}
+	for _, r := range rels {
+		if r.ToModel == "products" {
+			t.Fatalf("unexpected out-of-scope relationship retained: %+v", r)
+		}
+	}
+}
+
+func TestInferJoinsNoFilterWhenSelectedTablesEmpty(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{Name: "products", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{
+			Name:    "orders",
+			Columns: []postgres.ColumnInfo{{Name: "user_id"}, {Name: "product_id"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"user_id"}, ToTable: "users", ToColumns: []string{"id"}},
+				{FromColumns: []string{"product_id"}, ToTable: "products", ToColumns: []string{"id"}},
+			},
+		},
+	}
+
+	rels, dropped, err := InferJoins(tables, nil, "", nil)
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+	if dropped != 0 {
+		t.Fatalf("expected dropped_count=0 without filter, got %d", dropped)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("expected both relationships retained, got %d", len(rels))
+	}
+}
+
+func TestInferJoinsDropCountWarning(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{Name: "products", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{
+			Name:    "orders",
+			Columns: []postgres.ColumnInfo{{Name: "user_id"}, {Name: "product_id"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"user_id"}, ToTable: "users", ToColumns: []string{"id"}},
+				{FromColumns: []string{"product_id"}, ToTable: "products", ToColumns: []string{"id"}},
+			},
+		},
+	}
+
+	_, dropped, err := InferJoins(tables, nil, "", []string{"orders", "users"})
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+	if dropped == 0 {
+		t.Fatalf("expected dropped_count > 0 when out-of-scope relationships are present")
 	}
 }
 
@@ -243,7 +335,7 @@ func TestRelationshipIDFormat(t *testing.T) {
 		},
 	}
 
-	rels, err := InferJoins(tables, nil, "")
+	rels, _, err := InferJoins(tables, nil, "", nil)
 	if err != nil {
 		t.Fatalf("InferJoins returned error: %v", err)
 	}
@@ -252,5 +344,74 @@ func TestRelationshipIDFormat(t *testing.T) {
 	}
 	if rels[0].RelationshipID != "orders_user_id_date_to_users" {
 		t.Fatalf("unexpected composite relationship ID: %s", rels[0].RelationshipID)
+	}
+}
+
+func TestPreferredFlagAtMostOnePerModelPair(t *testing.T) {
+	t.Parallel()
+
+	tables := []postgres.TableInfo{
+		{Name: "users", Columns: []postgres.ColumnInfo{{Name: "id"}}},
+		{
+			Name:    "orders",
+			Columns: []postgres.ColumnInfo{{Name: "account_id"}, {Name: "owner_id"}, {Name: "user_id"}},
+			ForeignKeys: []postgres.FKConstraint{
+				{FromColumns: []string{"account_id"}, ToTable: "users", ToColumns: []string{"id"}},
+			},
+		},
+	}
+	usage := []postgres.UsageProfile{{TableName: "orders", ColumnName: "owner_id", JoinCount: 12}}
+	strataMD := "## Canonical Joins\norders.user_id = users.id\n"
+
+	rels, _, err := InferJoins(tables, usage, strataMD, nil)
+	if err != nil {
+		t.Fatalf("InferJoins returned error: %v", err)
+	}
+
+	preferredCount := 0
+	for _, r := range rels {
+		if r.FromModel == "orders" && r.ToModel == "users" && r.Preferred {
+			preferredCount++
+		}
+	}
+	if preferredCount != 1 {
+		t.Fatalf("expected exactly one preferred relationship for orders->users, got %d", preferredCount)
+	}
+}
+
+func TestPreferredFlagResetBeforeAssignment(t *testing.T) {
+	t.Parallel()
+
+	deduped := deduplicateRelationships([]InferredRelationship{
+		{
+			FromModel:  "orders",
+			ToModel:    "users",
+			FromColumn: "user_id",
+			ToColumn:   "id",
+			SourceType: sourceStrataMD,
+			Confidence: 0.95,
+			Preferred:  true,
+		},
+		{
+			FromModel:  "orders",
+			ToModel:    "users",
+			FromColumn: "account_id",
+			ToColumn:   "id",
+			SourceType: sourceSchemaConstraint,
+			Confidence: 1.0,
+			Preferred:  true,
+		},
+	})
+
+	markPreferred(deduped)
+
+	preferredCount := 0
+	for _, r := range deduped {
+		if r.FromModel == "orders" && r.ToModel == "users" && r.Preferred {
+			preferredCount++
+		}
+	}
+	if preferredCount != 1 {
+		t.Fatalf("expected at most one preferred relationship for orders->users, got %d", preferredCount)
 	}
 }
