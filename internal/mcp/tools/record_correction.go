@@ -40,15 +40,26 @@ func RecordCorrection(s ReloadableServer, getModel func() *smif.SemanticModel) (
 		newValue, _ := request.Params.Arguments["new_value"].(string)
 		reason, _ := request.Params.Arguments["reason"].(string)
 
-		if strings.TrimSpace(targetType) == "" || strings.TrimSpace(targetID) == "" || strings.TrimSpace(correctionType) == "" || strings.TrimSpace(newValue) == "" {
-			return nil, fmt.Errorf("target_type, target_id, correction_type, and new_value are required")
+		targetType = strings.TrimSpace(targetType)
+		targetID = strings.TrimSpace(targetID)
+		correctionType = strings.TrimSpace(correctionType)
+		newValue = strings.TrimSpace(newValue)
+
+		if missingField := firstMissingRequiredField(targetType, targetID, correctionType, newValue); missingField != "" {
+			return toolJSONError(
+				fmt.Sprintf("missing required field: %s", missingField),
+				"Required fields: target_type, target_id, correction_type, new_value",
+			)
 		}
 
 		correction := buildCorrection(targetType, targetID, correctionType, newValue, reason)
 
 		model := getModel()
 		if !targetResolves(model, correction.TargetType, correction.TargetID) {
-			return mcp.NewToolResultError("target_id does not resolve to a defined object"), nil
+			return toolJSONError(
+				fmt.Sprintf("target not found: %s", correction.TargetID),
+				"Check target_type and target_id match a defined object in the semantic model. Column targets use format model_id.column_name",
+			)
 		}
 
 		smifVersion := ""
@@ -60,10 +71,16 @@ func RecordCorrection(s ReloadableServer, getModel func() *smif.SemanticModel) (
 		}
 
 		if err := overlay.AppendCorrection(s.CorrectionsPath(), smifVersion, correction); err != nil {
-			return nil, err
+			return toolJSONError(
+				fmt.Sprintf("failed to write correction: %s", err.Error()),
+				"Check that corrections.yaml is writable and not locked by another process",
+			)
 		}
 		if err := s.Reload(); err != nil {
-			return nil, err
+			return toolJSONError(
+				fmt.Sprintf("correction written but model reload failed: %s", err.Error()),
+				"Restart strata serve to pick up the correction",
+			)
 		}
 
 		payload := map[string]any{
@@ -74,7 +91,10 @@ func RecordCorrection(s ReloadableServer, getModel func() *smif.SemanticModel) (
 
 		b, err := json.Marshal(payload)
 		if err != nil {
-			return nil, err
+			return toolJSONError(
+				fmt.Sprintf("failed to serialize correction response: %s", err.Error()),
+				"Retry the operation; if this persists, inspect server logs",
+			)
 		}
 		return mcp.NewToolResultText(string(b)), nil
 	}
@@ -102,13 +122,16 @@ func buildCorrection(targetType, targetID, correctionType, newValue, reason stri
 }
 
 func targetResolves(model *smif.SemanticModel, targetType, targetID string) bool {
-	if model == nil {
-		return false
-	}
+	targetType = strings.TrimSpace(targetType)
+	targetID = strings.TrimSpace(targetID)
+
 	switch targetType {
 	case "domain":
 		return true
 	case "model":
+		if model == nil {
+			return false
+		}
 		for _, m := range model.Models {
 			if m.ModelID == targetID {
 				return true
@@ -116,22 +139,33 @@ func targetResolves(model *smif.SemanticModel, targetType, targetID string) bool
 		}
 		return false
 	case "column":
+		if model == nil {
+			return false
+		}
 		parts := strings.SplitN(targetID, ".", 2)
 		if len(parts) != 2 {
 			return false
 		}
+		modelID := strings.TrimSpace(parts[0])
+		columnName := strings.TrimSpace(parts[1])
+		if modelID == "" || columnName == "" {
+			return false
+		}
 		for _, m := range model.Models {
-			if m.ModelID != parts[0] {
+			if m.ModelID != modelID {
 				continue
 			}
 			for _, c := range m.Columns {
-				if c.Name == parts[1] {
+				if c.Name == columnName {
 					return true
 				}
 			}
 		}
 		return false
 	case "relationship":
+		if model == nil {
+			return false
+		}
 		for _, r := range model.Relationships {
 			if r.RelationshipID == targetID {
 				return true
@@ -139,6 +173,9 @@ func targetResolves(model *smif.SemanticModel, targetType, targetID string) bool
 		}
 		return false
 	case "metric":
+		if model == nil {
+			return false
+		}
 		for _, m := range model.Metrics {
 			if m.Name == targetID {
 				return true
@@ -148,4 +185,27 @@ func targetResolves(model *smif.SemanticModel, targetType, targetID string) bool
 	default:
 		return false
 	}
+}
+
+func firstMissingRequiredField(targetType, targetID, correctionType, newValue string) string {
+	if targetType == "" {
+		return "target_type"
+	}
+	if targetID == "" {
+		return "target_id"
+	}
+	if correctionType == "" {
+		return "correction_type"
+	}
+	if newValue == "" {
+		return "new_value"
+	}
+	return ""
+}
+
+func toolJSONError(msg, hint string) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultText(fmt.Sprintf(
+		`{"error": %q, "hint": %q}`,
+		msg, hint,
+	)), nil
 }

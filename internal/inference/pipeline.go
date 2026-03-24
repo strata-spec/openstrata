@@ -1033,7 +1033,6 @@ func printSummary(model *smif.SemanticModel, musts, shoulds []smif.Violation) {
 	fmt.Printf("  Relationships: %d (%d schema, %d log-inferred)\n", relCount, schemaCount, logCount)
 	fmt.Println("  Metrics:       0")
 	fmt.Printf("  Flagged:       %d columns need human review\n", flagged)
-	fmt.Println("  Config:        .strata (git-ignored)")
 
 	if len(shoulds) > 0 {
 		fmt.Printf("\n  Warnings (%d):\n", len(shoulds))

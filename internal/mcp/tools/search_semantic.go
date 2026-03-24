@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -21,8 +22,9 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 	)
 
 	type scoredResult struct {
-		Score int
-		Item  map[string]any
+		Score     int
+		FieldRank int
+		Item      map[string]any
 	}
 
 	handler := func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -32,7 +34,10 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 		if query == "" {
 			return nil, fmt.Errorf("query is required")
 		}
-		qLower := strings.ToLower(query)
+		tokens := tokeniseQuery(query)
+		if len(tokens) == 0 {
+			return mcp.NewToolResultText("[]"), nil
+		}
 
 		model := getModel()
 		if model == nil {
@@ -44,14 +49,18 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 			if m.Suppressed {
 				continue
 			}
-			if score, field, snippet, ok := rankMatch(qLower, m.Name, m.Label, m.Description); ok {
+			score := scoreCandidate(tokens, m.Name, m.Label, m.Description)
+			if score > 0 {
+				field, snippet := bestMatchField(tokens, m.Name, m.Label, m.Description)
 				results = append(results, scoredResult{
-					Score: score,
+					Score:     score,
+					FieldRank: matchFieldRank(field),
 					Item: map[string]any{
 						"type":        "model",
 						"model_id":    m.ModelID,
 						"name":        m.Name,
 						"label":       m.Label,
+						"score":       score,
 						"match_field": field,
 						"snippet":     snippet,
 					},
@@ -62,14 +71,18 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 				if c.Suppressed {
 					continue
 				}
-				if score, field, snippet, ok := rankMatch(qLower, c.Name, c.Label, c.Description); ok {
+				score := scoreCandidate(tokens, c.Name, c.Label, c.Description)
+				if score > 0 {
+					field, snippet := bestMatchField(tokens, c.Name, c.Label, c.Description)
 					results = append(results, scoredResult{
-						Score: score,
+						Score:     score,
+						FieldRank: matchFieldRank(field),
 						Item: map[string]any{
 							"type":        "column",
 							"model_id":    m.ModelID,
 							"column_name": c.Name,
 							"label":       c.Label,
+							"score":       score,
 							"match_field": field,
 							"snippet":     snippet,
 						},
@@ -79,13 +92,17 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 		}
 
 		for _, c := range model.Concepts {
-			if score, field, snippet, ok := rankMatch(qLower, "", c.Label, c.Description); ok {
+			score := scoreCandidate(tokens, c.ConceptID, c.Label, c.Description)
+			if score > 0 {
+				field, snippet := bestMatchField(tokens, c.ConceptID, c.Label, c.Description)
 				results = append(results, scoredResult{
-					Score: score,
+					Score:     score,
+					FieldRank: matchFieldRank(field),
 					Item: map[string]any{
 						"type":        "concept",
 						"concept_id":  c.ConceptID,
 						"label":       c.Label,
+						"score":       score,
 						"match_field": field,
 						"snippet":     snippet,
 					},
@@ -96,6 +113,9 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 		sort.SliceStable(results, func(i, j int) bool {
 			if results[i].Score != results[j].Score {
 				return results[i].Score > results[j].Score
+			}
+			if results[i].FieldRank != results[j].FieldRank {
+				return results[i].FieldRank < results[j].FieldRank
 			}
 			iType, _ := results[i].Item["type"].(string)
 			jType, _ := results[j].Item["type"].(string)
@@ -127,22 +147,67 @@ func SearchSemantic(getModel func() *smif.SemanticModel) (mcp.Tool, server.ToolH
 	return tool, handler
 }
 
-func rankMatch(queryLower, name, label, description string) (score int, field, snippet string, ok bool) {
-	nameLower := strings.ToLower(name)
-	labelLower := strings.ToLower(label)
-	descLower := strings.ToLower(description)
+func tokeniseQuery(query string) []string {
+	raw := strings.FieldsFunc(
+		strings.ToLower(query),
+		func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		},
+	)
 
-	if nameLower == queryLower {
-		return 300, "name", name, true
+	seen := make(map[string]bool)
+	tokens := make([]string, 0, len(raw))
+	for _, t := range raw {
+		if len(t) < 2 {
+			continue
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		tokens = append(tokens, t)
 	}
-	if strings.Contains(labelLower, queryLower) {
-		return 200, "label", label, true
+
+	return tokens
+}
+
+func scoreCandidate(tokens []string, fields ...string) int {
+	score := 0
+	combined := strings.ToLower(strings.Join(fields, " "))
+	for _, token := range tokens {
+		if strings.Contains(combined, token) {
+			score++
+		}
 	}
-	if strings.Contains(nameLower, queryLower) {
-		return 150, "name", name, true
+	return score
+}
+
+func bestMatchField(tokens []string, name, label, description string) (field, snippet string) {
+	nameScore := scoreCandidate(tokens, name)
+	labelScore := scoreCandidate(tokens, label)
+	descScore := scoreCandidate(tokens, description)
+
+	if nameScore >= labelScore && nameScore >= descScore && nameScore > 0 {
+		return "name", name
 	}
-	if strings.Contains(descLower, queryLower) {
-		return 100, "description", description, true
+	if labelScore >= nameScore && labelScore >= descScore && labelScore > 0 {
+		return "label", label
 	}
-	return 0, "", "", false
+	if descScore > 0 {
+		return "description", description
+	}
+	return "description", description
+}
+
+func matchFieldRank(field string) int {
+	switch field {
+	case "name":
+		return 0
+	case "label":
+		return 1
+	case "description":
+		return 2
+	default:
+		return 3
+	}
 }
