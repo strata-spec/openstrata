@@ -80,6 +80,62 @@ func TestOmdbCastsDescriptionCorrectionFixture(t *testing.T) {
 	}
 }
 
+func TestOmdbMovieRatingsCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	want := map[string]string{
+		"vote_average": "always include WHERE kind = 'movie' when aggregating or ranking by this column",
+		"votes_count":  "always include WHERE kind = 'movie' when filtering or ranking by votes",
+	}
+
+	var moviesModel *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "movies" {
+			moviesModel = &merged.Models[i]
+			break
+		}
+	}
+	if moviesModel == nil {
+		t.Fatalf("movies model not found in merged output")
+	}
+
+	for colName, snippet := range want {
+		var col *smif.Column
+		for i := range moviesModel.Columns {
+			if moviesModel.Columns[i].Name == colName {
+				col = &moviesModel.Columns[i]
+				break
+			}
+		}
+		if col == nil {
+			t.Fatalf("column %s not found in movies model", colName)
+		}
+		if !strings.Contains(col.Description, snippet) {
+			t.Fatalf("column %s description missing required guidance; got: %q", colName, col.Description)
+		}
+		if col.Provenance.SourceType != "user_defined" {
+			t.Fatalf("column %s provenance source_type = %q, want user_defined", colName, col.Provenance.SourceType)
+		}
+	}
+}
+
 func TestApplyOverlayDescriptionOverride(t *testing.T) {
 	original := overlayBaseModel()
 	corrections := &CorrectionsFile{
