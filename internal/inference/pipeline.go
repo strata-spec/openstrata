@@ -905,6 +905,10 @@ func assembleModel(
 				XProperties: map[string]any{},
 			}
 
+			if len(profile.ValidValues) > 0 {
+				smifCol.ValidValues = append([]string(nil), profile.ValidValues...)
+			}
+
 			if strings.TrimSpace(smifCol.CardinalityCategory) == "" {
 				smifCol.CardinalityCategory = "unknown"
 			}
