@@ -423,3 +423,58 @@ func TestProfileUnsupportedType(t *testing.T) {
 		t.Fatalf("expected at least one profile with [unsupported type] example value")
 	}
 }
+
+// TestProfileBatchBoundary verifies that tables beyond the first batch
+// (i.e. at index profileBatchSize and beyond) are profiled correctly and
+// produce non-empty example_values when the underlying table has data.
+//
+// The test constructs profileBatchSize+1 TableInfo entries by repeating the
+// real tables from the test schema. Each entry must be profiled correctly
+// regardless of which batch it falls in, ensuring the result-mapping logic
+// correctly pairs each pgx.Batch result set with the table that generated it.
+func TestProfileBatchBoundary(t *testing.T) {
+	pool := integrationPool(t)
+	schema := loadTestSchema(t, pool)
+
+	// Introspect the test schema to get real TableInfo with column metadata.
+	realTables, _, err := Introspect(context.Background(), pool, schema)
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+	if len(realTables) == 0 {
+		t.Fatal("test schema has no tables")
+	}
+
+	// Build profileBatchSize+1 entries by cycling through the real tables.
+	// This guarantees at least one table falls in the second batch.
+	count := profileBatchSize + 1
+	tables := make([]TableInfo, 0, count)
+	for len(tables) < count {
+		tables = append(tables, realTables[len(tables)%len(realTables)])
+	}
+
+	profiles, err := Profile(context.Background(), pool, tables, NoOpProfileProgress{})
+	if err != nil {
+		t.Fatalf("Profile returned error: %v", err)
+	}
+
+	// Every table entry must appear in the result map with a valid profile.
+	for _, tbl := range tables {
+		for _, col := range tbl.Columns {
+			key := tbl.Name + "." + col.Name
+			p, ok := profiles[key]
+			if !ok {
+				t.Errorf("missing profile for %s", key)
+				continue
+			}
+			if p.ExampleValues == nil {
+				t.Errorf("profile for %s has nil ExampleValues", key)
+			}
+			// A profile produced by a failed query has CardinalityCategory "unknown".
+			// A successfully profiled column must not be "unknown".
+			if p.CardinalityCategory == "unknown" {
+				t.Errorf("profile for %s has unexpected CardinalityCategory %q (profiling may have failed)", key, p.CardinalityCategory)
+			}
+		}
+	}
+}
