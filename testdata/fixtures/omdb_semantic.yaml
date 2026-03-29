@@ -1,0 +1,179 @@
+smif_version: "0.1.0"
+generated_at: "2026-03-29T00:00:00Z"
+tool_version: "strata/0.1.0-alpha"
+
+source:
+  type: postgres
+  host_fingerprint: "b2c3d4e5f6a7b8c9"
+  schema_names:
+    - public
+
+domain:
+  name: omdb
+  description: >
+    Open movie database domain covering films, cast and crew credits,
+    and box-office financials. The primary grain is one film per row in
+    the movies table; each person-to-film credit is one row in casts.
+  key_concepts:
+    - box office revenue
+    - production budget
+    - cast and crew credits
+  known_gotchas:
+    - "The casts table stores both cast (actors) and crew (directors, producers, etc.) — there is no separate crew table"
+    - "revenue and budget are in USD; NULL means the figure was not reported publicly"
+  provenance:
+    source_type: llm_inferred
+    confidence: 0.85
+    human_reviewed: false
+
+models:
+  - model_id: movies
+    name: movies
+    label: Movies
+    grain: One row per film
+    description: >
+      Film catalog. Each row represents one distinct film title. Revenue and
+      budget figures are in USD and may be NULL when not publicly disclosed.
+    physical_source:
+      schema: public
+      table: movies
+    primary_key: id
+    ddl_fingerprint: "movies_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.9
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Movie ID
+        description: Surrogate primary key for the film.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: title
+        data_type: text
+        role: dimension
+        label: Title
+        description: Official release title of the film.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+      - name: revenue
+        data_type: numeric
+        role: measure
+        label: Revenue
+        description: Box office revenue in USD. NULL when not publicly reported.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+      - name: budget
+        data_type: numeric
+        role: measure
+        label: Budget
+        description: Production budget in USD. NULL when not publicly disclosed.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
+  - model_id: casts
+    name: casts
+    label: Cast Assignments
+    grain: One row per person per movie role
+    description: >
+      Movie cast and crew assignments by role.
+    physical_source:
+      schema: public
+      table: casts
+    ddl_fingerprint: "casts_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.9
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Cast ID
+        description: Surrogate primary key for the cast record.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: movie_id
+        data_type: bigint
+        role: dimension
+        label: Movie ID
+        description: Foreign key to the movies table identifying which film this credit belongs to.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: person_name
+        data_type: text
+        role: dimension
+        label: Person Name
+        description: Full name of the person credited in this role.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: crew_role
+        data_type: text
+        role: dimension
+        label: Crew Role
+        description: The specific credit role this person held (e.g. Actor, Director, Producer).
+        nullable: false
+        cardinality_category: low
+        example_values:
+          - Actor
+          - Director
+          - Producer
+          - Writer
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+relationships:
+  - relationship_id: rel_casts_movies
+    from_model: casts
+    from_column: movie_id
+    to_model: movies
+    to_column: id
+    relationship_type: many_to_one
+    join_condition: "casts.movie_id = movies.id"
+    semantic_role: parent
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
+metrics: []

@@ -1,10 +1,84 @@
 package overlay
 
 import (
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/strata-spec/openstrata/internal/smif"
 )
+
+func repoRoot() string {
+	_, file, _, _ := runtime.Caller(0)
+	// file is .../internal/overlay/merge_test.go — two levels up
+	return filepath.Join(filepath.Dir(file), "..", "..")
+}
+
+// TestOmdbCastsDescriptionCorrectionFixture verifies that the OMDB fixture
+// files parse correctly and that the user-defined description override for the
+// casts model is applied by the overlay, eliminating the hallucination-inducing
+// phrase "cast and crew" from the active description.
+func TestOmdbCastsDescriptionCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+	if len(corrections.Corrections) == 0 {
+		t.Fatalf("expected at least one correction in omdb_corrections.yaml")
+	}
+
+	corr := corrections.Corrections[0]
+	if corr.Source != "user_defined" {
+		t.Errorf("correction source = %q, want user_defined", corr.Source)
+	}
+	if corr.TargetType != "model" || corr.TargetID != "casts" {
+		t.Errorf("correction target = %s/%s, want model/casts", corr.TargetType, corr.TargetID)
+	}
+	if corr.CorrectionType != "description_override" {
+		t.Errorf("correction_type = %q, want description_override", corr.CorrectionType)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	var castsModel *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "casts" {
+			castsModel = &merged.Models[i]
+			break
+		}
+	}
+	if castsModel == nil {
+		t.Fatalf("casts model not found in merged output")
+	}
+
+	// The correction must have been applied — provenance must now be user_defined.
+	if castsModel.Provenance.SourceType != "user_defined" {
+		t.Errorf("casts provenance source_type = %q, want user_defined", castsModel.Provenance.SourceType)
+	}
+
+	// The new description must not contain the hallucination-inducing phrase.
+	if strings.Contains(castsModel.Description, "cast and crew") {
+		t.Errorf("casts description still contains ambiguous phrase 'cast and crew': %q", castsModel.Description)
+	}
+
+	// The new description must reference the physical table name to avoid CAST() confusion.
+	if !strings.Contains(strings.ToLower(castsModel.Description), "casts") {
+		t.Errorf("casts description should reference the physical table name 'casts': %q", castsModel.Description)
+	}
+}
 
 func TestApplyOverlayDescriptionOverride(t *testing.T) {
 	original := overlayBaseModel()
