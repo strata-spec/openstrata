@@ -1,0 +1,22 @@
+smif_version: "0.1.0"
+corrections:
+  - correction_id: corr_str12aa
+    target_type: model
+    target_id: casts
+    correction_type: description_override
+    new_value: >-
+      Person-to-film credit link table (physical table: casts). Each row records
+      one credited role held by one person in one film — this single table covers
+      both cast (actors) and crew (directors, producers, writers, etc.). There is
+      no separate crew table. Join to movies on movie_id. Note: the name 'casts'
+      refers to the physical table, not the SQL CAST() function.
+    reason: >-
+      Original description "Movie cast and crew assignments by role." caused LLM
+      agents to hallucinate a non-existent crew table when generating SQL queries.
+      The phrase "cast and crew" implied two separate tables, and the column name
+      crew_role reinforced this confusion. Updated description makes explicit that
+      the casts table is the sole source of all credit data for both actors and
+      crew, and disambiguates the table name from the SQL CAST() expression.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T20:31:21Z"
