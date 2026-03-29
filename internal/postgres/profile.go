@@ -69,8 +69,18 @@ func WithProfileTimeout(ctx context.Context, secs int) context.Context {
 	return context.WithValue(ctx, profileTimeoutKey, secs)
 }
 
+// profileBatchSize is the number of tables sent to the database in a single
+// pgx.Batch round-trip. Keeping it moderate bounds peak memory and avoids
+// overwhelming a connection with too many simultaneous result sets.
+const profileBatchSize = 8
+
+// sampleRowLimit is the maximum number of rows fetched per table for profiling.
+const sampleRowLimit = 10000
+
 // Profile collects sample data statistics for all columns in the given tables.
 // PII patterns are redacted from example values before they are stored.
+// Tables are processed in batches of profileBatchSize using pgx.Batch to
+// reduce round-trips; up to 4 batches run concurrently.
 func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, progress ProfileProgress) (map[string]ColumnProfile, error) {
 	if progress == nil {
 		progress = NoOpProfileProgress{}
@@ -96,84 +106,115 @@ func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, progre
 	profiles := make(map[string]ColumnProfile)
 	var mu sync.Mutex
 
-	tableLimiter := make(chan struct{}, 4)
+	batchLimiter := make(chan struct{}, 4)
 	g, gctx := errgroup.WithContext(ctx)
 
-	for _, table := range tables {
-		t := table
+	for batchStart := 0; batchStart < len(tables); batchStart += profileBatchSize {
+		batchEnd := batchStart + profileBatchSize
+		if batchEnd > len(tables) {
+			batchEnd = len(tables)
+		}
+		batchTables := tables[batchStart:batchEnd]
+
 		g.Go(func() (err error) {
 			select {
-			case tableLimiter <- struct{}{}:
+			case batchLimiter <- struct{}{}:
 			case <-gctx.Done():
 				return gctx.Err()
 			}
-			defer func() {
-				<-tableLimiter
-			}()
+			defer func() { <-batchLimiter }()
 
 			defer func() {
 				if r := recover(); r != nil {
-					err = fmt.Errorf("profile: panic while profiling table %s: %v", t.Name, r)
+					err = fmt.Errorf("profile: panic while profiling batch starting at %s: %v", batchTables[0].Name, r)
 				}
 			}()
 
-			tableCtx := gctx
+			batchCtx := gctx
 			if profileTimeoutSecs > 0 {
 				var cancel context.CancelFunc
-				tableCtx, cancel = context.WithTimeout(gctx, time.Duration(profileTimeoutSecs)*time.Second)
+				// Allow profileTimeoutSecs per table in the batch so that the
+				// per-table budget is preserved regardless of batch size.
+				batchCtx, cancel = context.WithTimeout(gctx, time.Duration(profileTimeoutSecs)*time.Duration(len(batchTables))*time.Second)
 				defer cancel()
 			}
 
-			rowsByColumn, fetchErr := fetchTableSampleRows(tableCtx, pool, t, useTableSample)
+			// rowsByTable[i] holds column→values for batchTables[i].
+			// A nil entry means the query for that table failed.
+			rowsByTable, fetchErr := fetchTableSampleRowsBatch(batchCtx, pool, batchTables, useTableSample)
 			if fetchErr != nil {
 				if errors.Is(fetchErr, context.Canceled) || errors.Is(fetchErr, context.DeadlineExceeded) {
 					if errors.Is(fetchErr, context.DeadlineExceeded) {
-						progress.TableSkipped(t.Name, "profiling timeout")
-						for _, col := range t.Columns {
-							profile := ColumnProfile{
-								TableName:           t.Name,
-								ColumnName:          col.Name,
-								ExampleValues:       []string{"[profiling timeout]"},
-								CardinalityCategory: "unknown",
+						for _, t := range batchTables {
+							progress.TableSkipped(t.Name, "profiling timeout")
+							for _, col := range t.Columns {
+								profile := ColumnProfile{
+									TableName:           t.Name,
+									ColumnName:          col.Name,
+									ExampleValues:       []string{"[profiling timeout]"},
+									CardinalityCategory: "unknown",
+								}
+								mu.Lock()
+								profiles[t.Name+"."+col.Name] = profile
+								mu.Unlock()
 							}
-
-							mu.Lock()
-							profiles[t.Name+"."+col.Name] = profile
-							mu.Unlock()
 						}
 						return nil
 					}
 					return gctx.Err()
 				}
 
-				progress.TableSkipped(t.Name, "profiling query failed")
-				for _, col := range t.Columns {
-					profile := ColumnProfile{
-						TableName:           t.Name,
-						ColumnName:          col.Name,
-						ExampleValues:       []string{"[profiling error]"},
-						CardinalityCategory: "unknown",
+				for _, t := range batchTables {
+					progress.TableSkipped(t.Name, "profiling query failed")
+					for _, col := range t.Columns {
+						profile := ColumnProfile{
+							TableName:           t.Name,
+							ColumnName:          col.Name,
+							ExampleValues:       []string{"[profiling error]"},
+							CardinalityCategory: "unknown",
+						}
+						mu.Lock()
+						profiles[t.Name+"."+col.Name] = profile
+						mu.Unlock()
 					}
-					mu.Lock()
-					profiles[t.Name+"."+col.Name] = profile
-					mu.Unlock()
 				}
 				return nil
 			}
 
-			for _, col := range t.Columns {
-				start := time.Now()
-				profile := profileColumnFromSample(t.Name, col.Name, rowsByColumn[col.Name])
-				profile.DurationMS = time.Since(start).Milliseconds()
+			// rowsByTable is parallel to batchTables: entry i covers batchTables[i].
+			for i, t := range batchTables {
+				rowsByColumn := rowsByTable[i]
+				if rowsByColumn == nil {
+					// Individual table query failed inside the batch.
+					progress.TableSkipped(t.Name, "profiling query failed")
+					for _, col := range t.Columns {
+						profile := ColumnProfile{
+							TableName:           t.Name,
+							ColumnName:          col.Name,
+							ExampleValues:       []string{"[profiling error]"},
+							CardinalityCategory: "unknown",
+						}
+						mu.Lock()
+						profiles[t.Name+"."+col.Name] = profile
+						mu.Unlock()
+					}
+					continue
+				}
 
-				mu.Lock()
-				profiles[t.Name+"."+col.Name] = profile
-				mu.Unlock()
+				for _, col := range t.Columns {
+					start := time.Now()
+					profile := profileColumnFromSample(t.Name, col.Name, rowsByColumn[col.Name])
+					profile.DurationMS = time.Since(start).Milliseconds()
 
-				done := nextDone()
-				progress.ColumnProfiled(t.Name, col.Name, done, totalColumns)
-				if p, ok := progress.(ProfileProgressWithStats); ok {
-					p.ColumnProfiledWithStats(t.Name, col.Name, profile, done, totalColumns)
+					mu.Lock()
+					profiles[t.Name+"."+col.Name] = profile
+					mu.Unlock()
+
+					done := nextDone()
+					progress.ColumnProfiled(t.Name, col.Name, done, totalColumns)
+					if p, ok := progress.(ProfileProgressWithStats); ok {
+						p.ColumnProfiledWithStats(t.Name, col.Name, profile, done, totalColumns)
+					}
 				}
 			}
 
@@ -225,13 +266,98 @@ func profileTimeoutFromContext(ctx context.Context) int {
 	return 0
 }
 
+// fetchTableSampleRowsBatch sends one query per table in a single pgx.Batch
+// round-trip and collects per-column sample values for each table.
+//
+// The returned slice is parallel to tables: result[i] is the column→values map
+// for tables[i]. A nil entry means the individual query for that table failed
+// (e.g. permission denied or table not found); the caller should treat it as a
+// profiling error for that table only.
+//
+// The function returns a non-nil error only for fatal conditions that affect the
+// whole batch (e.g. context cancellation or SendBatch failure).
+//
+// Result-mapping correctness: pgx.BatchResults returns result sets in the same
+// order as the queued queries, so the i-th br.Query() call corresponds exactly
+// to tables[i]. Both the queue loop and the read loop iterate over the same
+// tables slice in forward order, guaranteeing alignment.
+func fetchTableSampleRowsBatch(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, useTableSample bool) ([]map[string][]any, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, t := range tables {
+		tableIdent := pgx.Identifier{t.Schema, t.Name}.Sanitize()
+		if useTableSample {
+			batch.Queue("SELECT * FROM "+tableIdent+" TABLESAMPLE BERNOULLI($1) LIMIT $2", 1.0, sampleRowLimit)
+		} else {
+			batch.Queue("SELECT * FROM "+tableIdent+" LIMIT $1", sampleRowLimit)
+		}
+	}
+
+	br := pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	results := make([]map[string][]any, len(tables))
+
+	// Iterate in the same order as the queue loop above so that result set i
+	// is always paired with tables[i]. Using the loop index explicitly (i, t)
+	// rather than a separate counter avoids any off-by-one mismatch.
+	for i, t := range tables {
+		rowValues := make(map[string][]any, len(t.Columns))
+		for _, col := range t.Columns {
+			rowValues[col.Name] = make([]any, 0, sampleRowLimit)
+		}
+
+		rows, err := br.Query()
+		if err != nil {
+			// A query-level error (e.g. table not found, permission denied)
+			// affects only this table; leave results[i] nil and continue so
+			// that subsequent result sets are still consumed in order.
+			results[i] = nil
+			continue
+		}
+
+		fieldOrder := make([]string, 0, len(rows.FieldDescriptions()))
+		for _, fd := range rows.FieldDescriptions() {
+			fieldOrder = append(fieldOrder, string(fd.Name))
+		}
+
+		for rows.Next() {
+			vals, valErr := rows.Values()
+			if valErr != nil {
+				break
+			}
+			for j, val := range vals {
+				if j < len(fieldOrder) {
+					colName := fieldOrder[j]
+					if _, ok := rowValues[colName]; ok {
+						rowValues[colName] = append(rowValues[colName], val)
+					}
+				}
+			}
+		}
+		rows.Close()
+
+		if rows.Err() != nil {
+			results[i] = nil
+			continue
+		}
+
+		results[i] = rowValues
+	}
+
+	return results, nil
+}
+
 func fetchTableSampleRows(ctx context.Context, pool *pgxpool.Pool, table TableInfo, useTableSample bool) (map[string][]any, error) {
 	tableIdent := pgx.Identifier{table.Schema, table.Name}.Sanitize()
 	query := "SELECT * FROM " + tableIdent + " LIMIT $1"
-	args := []any{10000}
+	args := []any{sampleRowLimit}
 	if useTableSample {
 		query = "SELECT * FROM " + tableIdent + " TABLESAMPLE BERNOULLI($1) LIMIT $2"
-		args = []any{1.0, 10000}
+		args = []any{1.0, sampleRowLimit}
 	}
 
 	rows, err := pool.Query(ctx, query, args...)
@@ -242,7 +368,7 @@ func fetchTableSampleRows(ctx context.Context, pool *pgxpool.Pool, table TableIn
 
 	rowValues := make(map[string][]any, len(table.Columns))
 	for _, col := range table.Columns {
-		rowValues[col.Name] = make([]any, 0, 1024)
+		rowValues[col.Name] = make([]any, 0, sampleRowLimit)
 	}
 
 	fieldOrder := make([]string, 0, len(rows.FieldDescriptions()))
