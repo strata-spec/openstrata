@@ -38,21 +38,28 @@ type TemporalModel struct {
 	Note               string `json:"note,omitempty" yaml:"note,omitempty"`
 }
 
+// RequiredFilter is a mandatory SQL filter condition with a human-readable reason.
+type RequiredFilter struct {
+	Expression string `json:"expression" yaml:"expression"`
+	Reason     string `json:"reason"     yaml:"reason"`
+}
+
 // Model is a queryable semantic model.
 type Model struct {
-	ModelID        string         `json:"model_id" yaml:"model_id"`
-	Name           string         `json:"name" yaml:"name"`
-	Label          string         `json:"label" yaml:"label"`
-	Grain          string         `json:"grain,omitempty" yaml:"grain,omitempty"`
-	Description    string         `json:"description" yaml:"description"`
-	Suppressed     bool           `json:"suppressed,omitempty" yaml:"suppressed,omitempty"`
-	PhysicalSource PhysicalSource `json:"physical_source" yaml:"physical_source"`
-	PrimaryKey     any            `json:"primary_key,omitempty" yaml:"primary_key,omitempty"`
-	DDLFingerprint string         `json:"ddl_fingerprint" yaml:"ddl_fingerprint"`
-	RowCountEst    int64          `json:"row_count_estimate,omitempty" yaml:"row_count_estimate,omitempty"`
-	Columns        []Column       `json:"columns" yaml:"columns"`
-	Provenance     Provenance     `json:"provenance" yaml:"provenance"`
-	XProperties    map[string]any `json:"x_properties,omitempty" yaml:"x_properties,omitempty"`
+	ModelID         string           `json:"model_id" yaml:"model_id"`
+	Name            string           `json:"name" yaml:"name"`
+	Label           string           `json:"label" yaml:"label"`
+	Grain           string           `json:"grain,omitempty" yaml:"grain,omitempty"`
+	Description     string           `json:"description" yaml:"description"`
+	Suppressed      bool             `json:"suppressed,omitempty" yaml:"suppressed,omitempty"`
+	PhysicalSource  PhysicalSource   `json:"physical_source" yaml:"physical_source"`
+	PrimaryKey      any              `json:"primary_key,omitempty" yaml:"primary_key,omitempty"`
+	DDLFingerprint  string           `json:"ddl_fingerprint" yaml:"ddl_fingerprint"`
+	RowCountEst     int64            `json:"row_count_estimate,omitempty" yaml:"row_count_estimate,omitempty"`
+	RequiredFilters []RequiredFilter `json:"required_filters,omitempty" yaml:"required_filters,omitempty"`
+	Columns         []Column         `json:"columns" yaml:"columns"`
+	Provenance      Provenance       `json:"provenance" yaml:"provenance"`
+	XProperties     map[string]any   `json:"x_properties,omitempty" yaml:"x_properties,omitempty"`
 }
 
 // PhysicalSource identifies the backing table/view/sql for a model.
@@ -73,6 +80,8 @@ type Column struct {
 	Nullable            bool           `json:"nullable" yaml:"nullable"`
 	CardinalityCategory string         `json:"cardinality_category" yaml:"cardinality_category"`
 	ExampleValues       []string       `json:"example_values,omitempty" yaml:"example_values,omitempty"`
+	ValidValues         []string       `json:"valid_values,omitempty"   yaml:"valid_values,omitempty"`
+	CaseSensitive       *bool          `json:"case_sensitive,omitempty" yaml:"case_sensitive,omitempty"`
 	UsageProfile        *UsageProfile  `json:"usage_profile,omitempty" yaml:"usage_profile,omitempty"`
 	Difficulty          string         `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
 	NeedsReview         bool           `json:"needs_review,omitempty" yaml:"needs_review,omitempty"`
@@ -118,7 +127,7 @@ type Metric struct {
 	DefaultTimeDimension *ModelColumnRef       `json:"default_time_dimension,omitempty" yaml:"default_time_dimension,omitempty"`
 	ValidDimensions      []ModelColumnRef      `json:"valid_dimensions,omitempty" yaml:"valid_dimensions,omitempty"`
 	InvalidDimensions    []InvalidDimensionRef `json:"invalid_dimensions,omitempty" yaml:"invalid_dimensions,omitempty"`
-	RequiredFilters      []string              `json:"required_filters,omitempty" yaml:"required_filters,omitempty"`
+	RequiredFilters      []RequiredFilter      `json:"required_filters,omitempty" yaml:"required_filters,omitempty"`
 	Additivity           string                `json:"additivity,omitempty" yaml:"additivity,omitempty"`
 	Provenance           Provenance            `json:"provenance" yaml:"provenance"`
 	Status               string                `json:"status,omitempty" yaml:"status,omitempty"`

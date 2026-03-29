@@ -97,7 +97,14 @@ func applyCorrection(model *smif.SemanticModel, c Correction) {
 		}
 	case "required_filter_add":
 		if metric := findMetric(model, c.TargetType, c.TargetID); metric != nil {
-			metric.RequiredFilters = append(metric.RequiredFilters, newValue)
+			reason := strings.TrimSpace(c.Reason)
+			if reason == "" {
+				reason = "added via correction"
+			}
+			metric.RequiredFilters = append(metric.RequiredFilters, smif.RequiredFilter{
+				Expression: newValue,
+				Reason:     reason,
+			})
 			metric.Provenance.SourceType = "user_defined"
 		}
 	}

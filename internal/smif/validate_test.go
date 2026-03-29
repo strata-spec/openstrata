@@ -171,6 +171,26 @@ func TestValidateMustRules(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "V-043 required_filters include expression and reason",
+			rule: "V-043",
+			pass: ValidationDoc{Semantic: func() *SemanticModel {
+				m := validSemanticModel()
+				m.Models[0].RequiredFilters = []RequiredFilter{{
+					Expression: "deleted_at IS NULL",
+					Reason:     "soft-deleted rows",
+				}}
+				return m
+			}()},
+			fail: ValidationDoc{Semantic: func() *SemanticModel {
+				m := validSemanticModel()
+				m.Models[0].RequiredFilters = []RequiredFilter{{
+					Expression: "",
+					Reason:     "soft-deleted rows",
+				}}
+				return m
+			}()},
+		},
 	}
 
 	for _, tc := range tests {
@@ -222,6 +242,23 @@ func TestValidateShouldRules(t *testing.T) {
 			fail: ValidationDoc{Semantic: func() *SemanticModel {
 				m := validSemanticModel()
 				m.Models[0].DDLFingerprint = ""
+				return m
+			}()},
+		},
+		{
+			name: "W-011 valid_values should set case_sensitive",
+			rule: "W-011",
+			pass: ValidationDoc{Semantic: func() *SemanticModel {
+				m := validSemanticModel()
+				caseSensitive := true
+				m.Models[0].Columns[1].ValidValues = []string{"pending", "shipped"}
+				m.Models[0].Columns[1].CaseSensitive = &caseSensitive
+				return m
+			}()},
+			fail: ValidationDoc{Semantic: func() *SemanticModel {
+				m := validSemanticModel()
+				m.Models[0].Columns[1].ValidValues = []string{"pending", "shipped"}
+				m.Models[0].Columns[1].CaseSensitive = nil
 				return m
 			}()},
 		},

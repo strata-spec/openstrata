@@ -99,6 +99,7 @@ func AllRules() []Rule {
 		{ID: "V-040", Tier: TierMust, Scope: ScopeCorrections, Description: "correction_type is defined", Check: checkV040},
 		{ID: "V-041", Tier: TierMust, Scope: ScopeWorkspace, Description: "corrections smif_version matches semantic", Check: checkV041},
 		{ID: "V-042", Tier: TierMust, Scope: ScopeWorkspace, Description: "correction target_id resolves", Check: checkV042},
+		{ID: "V-043", Tier: TierMust, Scope: ScopeDocument, Description: "required_filters entries must include non-empty expression and reason", Check: checkV043},
 	}
 
 	should := []Rule{
@@ -112,6 +113,7 @@ func AllRules() []Rule {
 		{ID: "W-008", Tier: TierShould, Scope: ScopeDocument, Description: "Parameterised templates declare their parameters", Check: checkW008},
 		{ID: "W-009", Tier: TierShould, Scope: ScopeWorkspace, Description: "Pending corrections surfaced for review", Check: checkW009},
 		{ID: "W-010", Tier: TierShould, Scope: ScopeDocument, Description: "default_time_dimension should reference timestamp column", Check: checkW010},
+		{ID: "W-011", Tier: TierShould, Scope: ScopeDocument, Description: "columns with valid_values should declare case_sensitive", Check: checkW011},
 	}
 
 	rules := make([]Rule, 0, len(must)+len(should))
@@ -919,6 +921,66 @@ func checkV042(doc *ValidationDoc) []Violation {
 	return out
 }
 
+func checkV043(doc *ValidationDoc) []Violation {
+	if doc == nil || doc.Semantic == nil {
+		return nil
+	}
+
+	var out []Violation
+	for _, model := range doc.Semantic.Models {
+		for i, requiredFilter := range model.RequiredFilters {
+			if strings.TrimSpace(requiredFilter.Expression) == "" {
+				out = addViolation(
+					out,
+					"V-043",
+					TierMust,
+					fmt.Sprintf("models[%s].required_filters[%d].expression", model.ModelID, i),
+					"required_filters entries must include non-empty expression",
+				)
+			}
+			if strings.TrimSpace(requiredFilter.Reason) == "" {
+				out = addViolation(
+					out,
+					"V-043",
+					TierMust,
+					fmt.Sprintf("models[%s].required_filters[%d].reason", model.ModelID, i),
+					"required_filters entries must include non-empty reason",
+				)
+			}
+		}
+	}
+
+	for _, metric := range doc.Semantic.Metrics {
+		metricID := strings.TrimSpace(metric.MetricID)
+		if metricID == "" {
+			metricID = "?"
+		}
+
+		for i, requiredFilter := range metric.RequiredFilters {
+			if strings.TrimSpace(requiredFilter.Expression) == "" {
+				out = addViolation(
+					out,
+					"V-043",
+					TierMust,
+					fmt.Sprintf("metrics[%s].required_filters[%d].expression", metricID, i),
+					"required_filters entries must include non-empty expression",
+				)
+			}
+			if strings.TrimSpace(requiredFilter.Reason) == "" {
+				out = addViolation(
+					out,
+					"V-043",
+					TierMust,
+					fmt.Sprintf("metrics[%s].required_filters[%d].reason", metricID, i),
+					"required_filters entries must include non-empty reason",
+				)
+			}
+		}
+	}
+
+	return out
+}
+
 func checkW001(doc *ValidationDoc) []Violation {
 	if doc == nil || doc.Semantic == nil {
 		return nil
@@ -1073,5 +1135,28 @@ func checkW010(doc *ValidationDoc) []Violation {
 			out = addViolation(out, "W-010", TierShould, metricPath(metric.Name, "default_time_dimension"), "default_time_dimension should reference a timestamp column")
 		}
 	}
+	return out
+}
+
+func checkW011(doc *ValidationDoc) []Violation {
+	if doc == nil || doc.Semantic == nil {
+		return nil
+	}
+
+	var out []Violation
+	for _, model := range doc.Semantic.Models {
+		for _, column := range model.Columns {
+			if len(column.ValidValues) > 0 && column.CaseSensitive == nil {
+				out = addViolation(
+					out,
+					"W-011",
+					TierShould,
+					columnPath(model.ModelID, column.Name, "case_sensitive"),
+					"columns with valid_values should explicitly set case_sensitive",
+				)
+			}
+		}
+	}
+
 	return out
 }
