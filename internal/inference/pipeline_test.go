@@ -153,6 +153,91 @@ func TestAssembleModelNoFinePass(t *testing.T) {
 	}
 }
 
+func TestAssembleModelValidValues(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Schema: "public"}
+	tables := []postgres.TableInfo{
+		{
+			Name: "movies",
+			Columns: []postgres.ColumnInfo{
+				{Name: "kind", DataType: "text"},
+				{Name: "title", DataType: "text"},
+				{Name: "year", DataType: "integer"},
+			},
+		},
+	}
+	// kind has low distinct count and valid values enumerated; title and year do not.
+	profiles := map[string]postgres.ColumnProfile{
+		"movies.kind": {
+			TableName:           "movies",
+			ColumnName:          "kind",
+			DistinctCount:       3,
+			CardinalityCategory: "low",
+			ExampleValues:       []string{"movie", "short", "tvSeries"},
+			ValidValues:         []string{"movie", "short", "tvSeries"},
+		},
+		"movies.title": {
+			TableName:           "movies",
+			ColumnName:          "title",
+			DistinctCount:       50000,
+			CardinalityCategory: "high",
+			ExampleValues:       []string{"Inception"},
+		},
+		"movies.year": {
+			TableName:           "movies",
+			ColumnName:          "year",
+			DistinctCount:       80,
+			CardinalityCategory: "low",
+			ExampleValues:       []string{"2000"},
+		},
+	}
+
+	model, err := assembleModel(cfg, nil, tables, profiles, nil, nil, nil, nil, nil, false, "deadbeef")
+	if err != nil {
+		t.Fatalf("assembleModel returned error: %v", err)
+	}
+
+	if len(model.Models) != 1 {
+		t.Fatalf("expected one model, got %d", len(model.Models))
+	}
+
+	colByName := make(map[string]smif.Column, len(model.Models[0].Columns))
+	for _, c := range model.Models[0].Columns {
+		colByName[c.Name] = c
+	}
+
+	kindCol, ok := colByName["kind"]
+	if !ok {
+		t.Fatalf("expected kind column in model")
+	}
+	if len(kindCol.ValidValues) != 3 {
+		t.Fatalf("expected 3 valid_values for kind, got %v", kindCol.ValidValues)
+	}
+	for _, want := range []string{"movie", "short", "tvSeries"} {
+		found := false
+		for _, v := range kindCol.ValidValues {
+			if v == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected %q in kind valid_values, got %v", want, kindCol.ValidValues)
+		}
+	}
+
+	titleCol := colByName["title"]
+	if len(titleCol.ValidValues) != 0 {
+		t.Fatalf("expected no valid_values for high-cardinality title column, got %v", titleCol.ValidValues)
+	}
+
+	yearCol := colByName["year"]
+	if len(yearCol.ValidValues) != 0 {
+		t.Fatalf("expected no valid_values for non-text year column, got %v", yearCol.ValidValues)
+	}
+}
+
 func TestWriteOutputsCreatesThreeFiles(t *testing.T) {
 	t.Parallel()
 

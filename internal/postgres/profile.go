@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,9 +35,14 @@ type ColumnProfile struct {
 	DistinctCount       int64
 	NullCount           int64
 	ExampleValues       []string
+	ValidValues         []string
 	CardinalityCategory string
 	DurationMS          int64
 }
+
+// validValuesEnumLimit is the maximum number of distinct values fetched for
+// low-cardinality text columns when populating ValidValues.
+const validValuesEnumLimit = 50
 
 type profileContextKey string
 
@@ -177,6 +184,32 @@ func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, progre
 				}
 			}
 
+			// Enumerate all distinct values for low-cardinality text columns so
+			// that the semantic layer can surface valid_values to LLM query agents.
+			// Only runs when the sample shows fewer than validValuesEnumLimit
+			// distinct values to avoid enumerating high-cardinality free-text columns.
+			for _, col := range t.Columns {
+				if !isTextLikeType(col.DataType) {
+					continue
+				}
+				profileKey := t.Name + "." + col.Name
+				mu.Lock()
+				prof := profiles[profileKey]
+				mu.Unlock()
+				if prof.DistinctCount <= 0 || prof.DistinctCount >= validValuesEnumLimit {
+					continue
+				}
+				vals, enumErr := enumerateDistinctValues(tableCtx, pool, t, col.Name)
+				if enumErr != nil {
+					log.Printf("profile: table %s.%s column %s: enumerate distinct values: %v", t.Schema, t.Name, col.Name, enumErr)
+					continue
+				}
+				prof.ValidValues = vals
+				mu.Lock()
+				profiles[profileKey] = prof
+				mu.Unlock()
+			}
+
 			return nil
 		})
 	}
@@ -212,6 +245,46 @@ func cardinalityCategory(distinctCount int64) string {
 		return "medium"
 	}
 	return "high"
+}
+
+// isTextLikeType returns true for column data types that store human-readable
+// categorical text and are candidates for valid_values enumeration.
+func isTextLikeType(dataType string) bool {
+	dt := strings.ToLower(strings.TrimSpace(dataType))
+	return dt == "text" ||
+		dt == "name" ||
+		strings.HasPrefix(dt, "character varying") ||
+		strings.HasPrefix(dt, "varchar") ||
+		strings.HasPrefix(dt, "character(") ||
+		strings.HasPrefix(dt, "char(")
+}
+
+// enumerateDistinctValues fetches up to validValuesEnumLimit distinct non-null
+// values for a single column, ordered lexicographically.
+func enumerateDistinctValues(ctx context.Context, pool *pgxpool.Pool, table TableInfo, columnName string) ([]string, error) {
+	tableIdent := pgx.Identifier{table.Schema, table.Name}.Sanitize()
+	colIdent := pgx.Identifier{columnName}.Sanitize()
+	query := fmt.Sprintf(
+		"SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL ORDER BY 1 LIMIT %d",
+		colIdent, tableIdent, colIdent, validValuesEnumLimit,
+	)
+
+	rows, err := pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vals []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		vals = append(vals, v)
+	}
+
+	return vals, rows.Err()
 }
 
 func profileTimeoutFromContext(ctx context.Context) int {

@@ -72,6 +72,46 @@ func TestCardinalityCategory(t *testing.T) {
 	}
 }
 
+func TestIsTextLikeType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		dataType string
+		want     bool
+	}{
+		{"text", true},
+		{"TEXT", true},
+		{"character varying(255)", true},
+		{"character varying", true},
+		{"varchar(100)", true},
+		{"varchar", true},
+		{"character(10)", true},
+		{"char(1)", true},
+		{"name", true},
+		// Non-text types should return false.
+		{"integer", false},
+		{"bigint", false},
+		{"numeric(12,2)", false},
+		{"boolean", false},
+		{"timestamp with time zone", false},
+		{"timestamptz", false},
+		{"uuid", false},
+		{"jsonb", false},
+		{"bytea", false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.dataType, func(t *testing.T) {
+			t.Parallel()
+			got := isTextLikeType(tc.dataType)
+			if got != tc.want {
+				t.Fatalf("isTextLikeType(%q): expected %v, got %v", tc.dataType, tc.want, got)
+			}
+		})
+	}
+}
+
 func TestProfileSampleBased(t *testing.T) {
 	pool := integrationPool(t)
 	schema := loadTestSchema(t, pool)
