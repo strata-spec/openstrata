@@ -60,6 +60,9 @@ func (s *Server) Start(port int) error {
 	recordTool, recordHandler := tools.RecordCorrection(s, s.getModel)
 	s.mcpServer.AddTool(recordTool, recordHandler)
 
+	formatTool, formatHandler := tools.FormatSMIFContext(s.getModel)
+	s.mcpServer.AddTool(formatTool, formatHandler)
+
 	return mcpserver.ServeStdio(s.mcpServer)
 }
 
