@@ -2,6 +2,7 @@ package inference
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	coarsepkg "github.com/strata-spec/openstrata/internal/inference/coarse"
 	finepkg "github.com/strata-spec/openstrata/internal/inference/fine"
 	joinspkg "github.com/strata-spec/openstrata/internal/inference/joins"
+	llmpkg "github.com/strata-spec/openstrata/internal/inference/llm"
 	"github.com/strata-spec/openstrata/internal/postgres"
+	"github.com/strata-spec/openstrata/internal/runlog"
 	"github.com/strata-spec/openstrata/internal/smif"
 	appversion "github.com/strata-spec/openstrata/internal/version"
 )
@@ -504,4 +507,55 @@ func makeTablesForCountTests(n int) []postgres.TableInfo {
 		})
 	}
 	return tables
+}
+
+// stubLLMClient is a minimal LLMClient implementation for unit tests.
+type stubLLMClient struct {
+	model string
+}
+
+func (s *stubLLMClient) GenerateStructured(_ context.Context, _ string, _ []byte, _ any) (llmpkg.GenerateResult, error) {
+	return llmpkg.GenerateResult{}, nil
+}
+func (s *stubLLMClient) Provider() string { return "stub" }
+func (s *stubLLMClient) Model() string    { return s.model }
+
+func TestStrataLogIncludesLLMModel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "strata.log")
+
+	rl, err := runlog.Open(logPath)
+	if err != nil {
+		t.Fatalf("open runlog: %v", err)
+	}
+
+	stub := &stubLLMClient{model: "deepseek-chat"}
+
+	// Write the run_start entry exactly as pipeline.Init does.
+	rl.Write(runlog.Entry{
+		Event:    "run_start",
+		LLMModel: stub.Model(),
+		BaseURL:  "https://api.deepseek.com",
+	})
+	if err := rl.Close(); err != nil {
+		t.Fatalf("close runlog: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read strata.log: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, `"event":"run_start"`) {
+		t.Fatalf("expected run_start event in strata.log, got: %q", content)
+	}
+	if !strings.Contains(content, `"llm_model":"deepseek-chat"`) {
+		t.Fatalf("expected llm_model in strata.log, got: %q", content)
+	}
+	if !strings.Contains(content, `"base_url":"https://api.deepseek.com"`) {
+		t.Fatalf("expected base_url in strata.log, got: %q", content)
+	}
 }

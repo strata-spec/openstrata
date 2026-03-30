@@ -9,29 +9,37 @@ import (
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 )
 
-const defaultAnthropicModel = "claude-sonnet-4-20250514"
 const maxTokens = 4096
 
 // AnthropicClient is the Anthropic implementation of LLMClient.
 type AnthropicClient struct {
 	client anthropic.Client
 	model  string
+	apiKey string
 }
 
 func NewAnthropicClient() (*AnthropicClient, error) {
-	model := os.Getenv("STRATA_ANTHROPIC_MODEL")
+	// STRATA_LLM_MODEL takes precedence; fall back to the legacy
+	// STRATA_ANTHROPIC_MODEL override, then the built-in default.
+	model := os.Getenv("STRATA_LLM_MODEL")
 	if model == "" {
-		model = defaultAnthropicModel
+		model = envOrDefault("STRATA_ANTHROPIC_MODEL", DefaultModel)
+	}
+
+	// STRATA_LLM_API_KEY takes precedence; fall back to ANTHROPIC_API_KEY.
+	apiKey := os.Getenv("STRATA_LLM_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 
 	client := anthropic.NewClient()
-	return &AnthropicClient{client: client, model: model}, nil
+	return &AnthropicClient{client: client, model: model, apiKey: apiKey}, nil
 }
 
 // GenerateStructured sends a structured prompt to Anthropic.
 func (c *AnthropicClient) GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) (GenerateResult, error) {
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		return GenerateResult{}, fmt.Errorf("anthropic: missing ANTHROPIC_API_KEY")
+	if c.apiKey == "" {
+		return GenerateResult{}, fmt.Errorf("anthropic: missing API key (set STRATA_LLM_API_KEY or ANTHROPIC_API_KEY)")
 	}
 
 	var schemaMap map[string]any
@@ -76,6 +84,11 @@ func (c *AnthropicClient) GenerateStructured(ctx context.Context, prompt string,
 // Provider returns the provider identifier.
 func (c *AnthropicClient) Provider() string {
 	return "anthropic"
+}
+
+// Model returns the model name used for inference calls.
+func (c *AnthropicClient) Model() string {
+	return c.model
 }
 
 func extractAnthropicToolResult(resp *anthropic.Message, result any) error {

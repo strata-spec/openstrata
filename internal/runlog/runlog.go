@@ -11,7 +11,7 @@ import (
 // Entry is a single structured run-log event.
 type Entry struct {
 	Time       string `json:"time"`
-	Stage      int    `json:"stage"`
+	Stage      int    `json:"stage,omitempty"`
 	Event      string `json:"event"`
 	Table      string `json:"table,omitempty"`
 	Column     string `json:"column,omitempty"`
@@ -22,6 +22,9 @@ type Entry struct {
 
 	TokensIn  int `json:"tokens_in,omitempty"`
 	TokensOut int `json:"tokens_out,omitempty"`
+
+	LLMModel string `json:"llm_model,omitempty"`
+	BaseURL  string `json:"base_url,omitempty"`
 
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
