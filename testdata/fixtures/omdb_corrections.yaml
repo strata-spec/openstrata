@@ -51,6 +51,23 @@ corrections:
     source: user_defined
     status: approved
     timestamp: "2026-03-29T21:42:49Z"
+  - correction_id: corr_str29jm
+    target_type: model
+    target_id: jobs
+    correction_type: description_override
+    new_value: >-
+      Job/role titles for crew credits. Values are multilingual — includes
+      German terms: 'Drehbuch' = screenplay/screenwriter, 'Regie' = director.
+      Join to casts on job_id to find credits by role.
+    reason: >-
+      q024 (Drehbuch) failed for both baseline and Strata because agents did
+      not know that jobs.name contains German job titles. Without this context,
+      agents cannot construct correct WHERE filters for German-language role
+      names such as "Drehbuch" (screenplay/screenwriter) or "Regie" (director).
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:44Z"
+
   - correction_id: corr_str28aa
     target_type: column
     target_id: categories.root_id
