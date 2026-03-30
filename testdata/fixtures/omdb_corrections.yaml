@@ -51,3 +51,35 @@ corrections:
     source: user_defined
     status: approved
     timestamp: "2026-03-29T21:42:49Z"
+  - correction_id: corr_str28aa
+    target_type: column
+    target_id: categories.root_id
+    correction_type: description_override
+    new_value: >-
+      References the top-level category type. Known values: 1 = Genre, 8 =
+      Keyword. Filter on this column to scope queries to a specific category
+      type — e.g. WHERE root_id = 1 for genre queries.
+    reason: >-
+      Agents could not construct valid genre or keyword filters without knowing
+      what root_id values mean. q023 (genre tree) was failing because the
+      discriminator values were undocumented.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:00Z"
+  - correction_id: corr_str28ab
+    target_type: model
+    target_id: categories
+    correction_type: description_override
+    new_value: >-
+      Hierarchical category taxonomy used to classify films by type. Each row is
+      one category node. parent_id is a self-referential foreign key that
+      references categories.id — NULL for top-level root nodes. root_id
+      identifies the top-level category type (1 = Genre, 8 = Keyword). Use
+      WHERE root_id = 1 to scope to genre nodes.
+    reason: >-
+      Original description did not document the self-referential parent_id
+      relationship or the root_id discriminator values, causing query agents to
+      fail on genre tree queries (q023).
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:00Z"

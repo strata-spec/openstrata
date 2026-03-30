@@ -81,6 +81,8 @@ func TestOmdbCastsDescriptionCorrectionFixture(t *testing.T) {
 }
 
 func TestOmdbMovieRatingsCorrectionFixture(t *testing.T) {
+}
+
 // TestOmdbAccessLogSuppressCorrection verifies that the suppress correction for
 // access_log is applied by the overlay, removing it from the effective model
 // list visible to query agents.
@@ -168,6 +170,7 @@ func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
 		if col.Provenance.SourceType != "user_defined" {
 			t.Fatalf("column %s provenance source_type = %q, want user_defined", colName, col.Provenance.SourceType)
 		}
+	}
 	// After overlay, access_log must be marked suppressed.
 	var mergedAccessLog *smif.Model
 	for i := range merged.Models {
@@ -184,6 +187,89 @@ func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
 	}
 	if mergedAccessLog.Provenance.SourceType != "user_defined" {
 		t.Errorf("access_log provenance source_type = %q, want user_defined", mergedAccessLog.Provenance.SourceType)
+	}
+}
+
+// TestOmdbCategoriesRootIDCorrectionFixture verifies that the description
+// override correction for categories.root_id is applied by the overlay,
+// ensuring query agents can construct valid genre and keyword filters.
+func TestOmdbCategoriesRootIDCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	// Locate the root_id correction.
+	var rootIDCorr *Correction
+	for i := range corrections.Corrections {
+		c := &corrections.Corrections[i]
+		if c.TargetType == "column" && c.TargetID == "categories.root_id" && c.CorrectionType == "description_override" {
+			rootIDCorr = c
+			break
+		}
+	}
+	if rootIDCorr == nil {
+		t.Fatalf("expected a description_override correction for categories.root_id in omdb_corrections.yaml")
+	}
+	if rootIDCorr.Source != "user_defined" {
+		t.Errorf("correction source = %q, want user_defined", rootIDCorr.Source)
+	}
+	if rootIDCorr.Status != "approved" {
+		t.Errorf("correction status = %q, want approved", rootIDCorr.Status)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	var categoriesModel *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "categories" {
+			categoriesModel = &merged.Models[i]
+			break
+		}
+	}
+	if categoriesModel == nil {
+		t.Fatalf("categories model not found in merged output")
+	}
+
+	var rootIDCol *smif.Column
+	for i := range categoriesModel.Columns {
+		if categoriesModel.Columns[i].Name == "root_id" {
+			rootIDCol = &categoriesModel.Columns[i]
+			break
+		}
+	}
+	if rootIDCol == nil {
+		t.Fatalf("root_id column not found in categories model")
+	}
+
+	if !strings.Contains(rootIDCol.Description, "1 = Genre") {
+		t.Errorf("root_id description should document Genre value mapping; got: %q", rootIDCol.Description)
+	}
+	if !strings.Contains(rootIDCol.Description, "8 = Keyword") {
+		t.Errorf("root_id description should document Keyword value mapping; got: %q", rootIDCol.Description)
+	}
+	if rootIDCol.Provenance.SourceType != "user_defined" {
+		t.Errorf("root_id provenance source_type = %q, want user_defined", rootIDCol.Provenance.SourceType)
+	}
+
+	// Verify categories model description correction was also applied.
+	if !strings.Contains(categoriesModel.Description, "parent_id") {
+		t.Errorf("categories description should mention parent_id self-referential key; got: %q", categoriesModel.Description)
+	}
+	if categoriesModel.Provenance.SourceType != "user_defined" {
+		t.Errorf("categories model provenance source_type = %q, want user_defined", categoriesModel.Provenance.SourceType)
 	}
 }
 
