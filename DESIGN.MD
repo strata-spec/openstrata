@@ -302,16 +302,59 @@ type LLMClient interface {
     // forcing structured output using provider-appropriate mechanisms
     // (tool-use forcing for Anthropic, response_format for OpenAI).
     // Retries once on malformed output before returning an error.
-    GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) error
-    
+    GenerateStructured(ctx context.Context, prompt string, schema []byte, result any) (GenerateResult, error)
+
     // Provider returns a string identifying the provider (for logging).
     Provider() string
+
+    // Model returns the model name used for inference calls.
+    Model() string
 }
 ```
 
 The pipeline only imports `inference/llm`. It never imports
 `inference/llm/anthropic` or `inference/llm/openai` directly. Provider
-selection happens in `cmd/init.go` based on the `--llm` flag.
+selection happens in `cmd/init.go` based on the `--llm` flag, but
+environment variables take precedence (see below).
+
+### Environment variable contract
+
+All LLM calls in the inference pipeline (`strata init`, coarse pass, fine
+pass) are configured by the following environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `STRATA_LLM_MODEL` | `claude-sonnet-4-20250514` | Model name passed to the provider API |
+| `STRATA_LLM_BASE_URL` | *(empty — use provider default)* | OpenAI-compatible base URL override |
+| `STRATA_LLM_API_KEY` | *(see fallback chain below)* | API key |
+
+**`STRATA_LLM_API_KEY` fallback chain:** `STRATA_LLM_API_KEY` →
+`ANTHROPIC_API_KEY` → `OPENAI_API_KEY`.
+
+**`STRATA_LLM_BASE_URL`** enables any OpenAI-compatible endpoint
+(DeepSeek, Gemini, local Ollama, etc.) with no code changes. When set,
+an OpenAI-compatible client is used regardless of the `--llm` flag:
+
+```bash
+STRATA_LLM_MODEL=deepseek-chat \
+STRATA_LLM_BASE_URL=https://api.deepseek.com \
+STRATA_LLM_API_KEY=<key> \
+strata init --db $DSN
+```
+
+**Default behaviour is unchanged** — if no env vars are set, the existing
+Anthropic/Sonnet behaviour is preserved.
+
+**Note:** inference quality is model-dependent. Results from smaller or
+quantised models may have lower confidence scores.
+
+Every `strata init` run writes a `run_start` entry to `strata.log` that
+includes the resolved model and base URL, ensuring `semantic.yaml` outputs
+are reproducible and traceable:
+
+```json
+{"time":"...","event":"run_start","llm_model":"deepseek-chat","base_url":"https://api.deepseek.com"}
+```
 
 ---
 

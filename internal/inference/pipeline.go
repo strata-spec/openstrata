@@ -56,6 +56,16 @@ func Init(ctx context.Context, cfg Config) error {
 	defer func() { _ = rl.Close() }()
 	cfg.RunLog = rl
 
+	llmModel := ""
+	if cfg.LLM != nil {
+		llmModel = cfg.LLM.Model()
+	}
+	cfg.RunLog.Write(runlog.Entry{
+		Event:    "run_start",
+		LLMModel: llmModel,
+		BaseURL:  os.Getenv("STRATA_LLM_BASE_URL"),
+	})
+
 	done := cfg.Progress.Stage("Stage 1 — strata.md ingestion")
 	strataMD, strataMDFound, err := Load(cfg.StrataMDPath)
 	if err != nil {
