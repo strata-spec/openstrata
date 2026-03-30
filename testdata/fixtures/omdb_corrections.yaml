@@ -20,3 +20,83 @@ corrections:
     source: user_defined
     status: approved
     timestamp: "2026-03-29T20:31:21Z"
+  - correction_id: corr_str27va
+    target_type: column
+    target_id: movies.vote_average
+    correction_type: description_override
+    new_value: >-
+      Average user rating (0–10). Only meaningful for rows where kind = 'movie'
+      — always include WHERE kind = 'movie' when aggregating or ranking by this
+      column. TV series and episodes have ratings that should not be mixed with
+      film ratings.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:10Z"
+  - correction_id: corr_str27vc
+    target_type: column
+    target_id: movies.votes_count
+    correction_type: description_override
+    new_value: >-
+      Number of user votes. Only meaningful for rows where kind = 'movie' —
+      always include WHERE kind = 'movie' when filtering or ranking by votes.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:10Z"
+  - correction_id: corr_str26bb
+    target_type: model
+    target_id: access_log
+    correction_type: suppress
+    new_value: "true"
+    reason: "Web server access log — not a domain model, no business meaning for query agents."
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:49Z"
+  - correction_id: corr_str29jm
+    target_type: model
+    target_id: jobs
+    correction_type: description_override
+    new_value: >-
+      Job/role titles for crew credits. Values are multilingual — includes
+      German terms: 'Drehbuch' = screenplay/screenwriter, 'Regie' = director.
+      Join to casts on job_id to find credits by role.
+    reason: >-
+      q024 (Drehbuch) failed for both baseline and Strata because agents did
+      not know that jobs.name contains German job titles. Without this context,
+      agents cannot construct correct WHERE filters for German-language role
+      names such as "Drehbuch" (screenplay/screenwriter) or "Regie" (director).
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:44Z"
+
+  - correction_id: corr_str28aa
+    target_type: column
+    target_id: categories.root_id
+    correction_type: description_override
+    new_value: >-
+      References the top-level category type. Known values: 1 = Genre, 8 =
+      Keyword. Filter on this column to scope queries to a specific category
+      type — e.g. WHERE root_id = 1 for genre queries.
+    reason: >-
+      Agents could not construct valid genre or keyword filters without knowing
+      what root_id values mean. q023 (genre tree) was failing because the
+      discriminator values were undocumented.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:00Z"
+  - correction_id: corr_str28ab
+    target_type: model
+    target_id: categories
+    correction_type: description_override
+    new_value: >-
+      Hierarchical category taxonomy used to classify films by type. Each row is
+      one category node. parent_id is a self-referential foreign key that
+      references categories.id — NULL for top-level root nodes. root_id
+      identifies the top-level category type (1 = Genre, 8 = Keyword). Use
+      WHERE root_id = 1 to scope to genre nodes.
+    reason: >-
+      Original description did not document the self-referential parent_id
+      relationship or the root_id discriminator values, causing query agents to
+      fail on genre tree queries (q023).
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-30T08:55:00Z"

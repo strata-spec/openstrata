@@ -92,6 +92,106 @@ models:
           confidence: 0.9
           human_reviewed: false
 
+      - name: vote_average
+        data_type: numeric
+        role: measure
+        label: Average Rating
+        description: Average user rating on a 0-10 scale.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: votes_count
+        data_type: integer
+        role: measure
+        label: Vote Count
+        description: Total number of user votes recorded for the title.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+  - model_id: access_log
+    name: access_log
+    label: Access Log
+    grain: One row per HTTP request
+    description: >
+      Web server access log. Each row records one HTTP request served by the
+      application. Contains request metadata such as method, path, status code,
+      and response time. This is an operational log table with no domain meaning.
+    physical_source:
+      schema: public
+      table: access_log
+    primary_key: id
+    ddl_fingerprint: "access_log_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.6
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Log ID
+        description: Surrogate primary key for the log entry.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: method
+        data_type: text
+        role: dimension
+        label: HTTP Method
+        description: HTTP request method (e.g. GET, POST, PUT, DELETE).
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: status_code
+        data_type: integer
+        role: dimension
+        label: HTTP Status Code
+        description: HTTP response status code returned by the server.
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: path
+        data_type: text
+        role: dimension
+        label: Request Path
+        description: URL path of the HTTP request.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: requested_at
+        data_type: timestamptz
+        role: timestamp
+        label: Requested At
+        description: Timestamp when the HTTP request was received, in UTC.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
   - model_id: casts
     name: casts
     label: Cast Assignments
@@ -160,7 +260,122 @@ models:
           confidence: 0.8
           human_reviewed: false
 
+      - name: job_id
+        data_type: bigint
+        role: dimension
+        label: Job ID
+        description: Foreign key to the jobs table identifying the crew role/job title for this credit.
+        nullable: true
+        cardinality_category: low
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+  - model_id: jobs
+    name: jobs
+    label: Jobs
+    grain: One row per job/role title
+    description: >
+      Job and role title lookup table for crew credits.
+    physical_source:
+      schema: public
+      table: jobs
+    primary_key: id
+    ddl_fingerprint: "jobs_fingerprint"
+  - model_id: categories
+    name: categories
+    label: Categories
+    grain: One row per category node
+    description: >
+      Hierarchical category taxonomy used to classify films by type. Each row is
+      one category node. parent_id references categories.id, forming a
+      self-referential hierarchy. root_id identifies the top-level category type
+      that this node belongs to.
+    physical_source:
+      schema: public
+      table: categories
+    primary_key: id
+    ddl_fingerprint: "categories_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.8
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Job ID
+        description: Surrogate primary key for the job record.
+        nullable: false
+        cardinality_category: low
+        data_type: integer
+        role: identifier
+        label: Category ID
+        description: Surrogate primary key for the category node.
+        nullable: false
+        cardinality_category: medium
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: name
+        data_type: text
+        role: dimension
+        label: Job Name
+        description: Title of the job or crew role.
+        nullable: false
+        cardinality_category: low
+        label: Category Name
+        description: Display name of the category node.
+        nullable: false
+        cardinality_category: medium
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: parent_id
+        data_type: integer
+        role: dimension
+        label: Parent Category ID
+        description: Self-referential foreign key to categories.id. NULL for top-level root nodes.
+        nullable: true
+        cardinality_category: medium
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: root_id
+        data_type: integer
+        role: dimension
+        label: Root Category ID
+        description: Top-level ancestor category for this node.
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.7
+          human_reviewed: false
+
 relationships:
+  - relationship_id: rel_casts_jobs
+    from_model: casts
+    from_column: job_id
+    to_model: jobs
+    to_column: id
+    relationship_type: many_to_one
+    join_condition: "casts.job_id = jobs.id"
+    semantic_role: parent
+    always_valid: true
+    preferred: true
+    provenance:
+      source_type: schema_constraint
+      confidence: 1.0
+      human_reviewed: false
+
   - relationship_id: rel_casts_movies
     from_model: casts
     from_column: movie_id
