@@ -909,6 +909,11 @@ func assembleModel(
 				smifCol.ValidValues = append([]string(nil), profile.ValidValues...)
 			}
 
+			if len(smifCol.ValidValues) > 0 {
+				t := true
+				smifCol.CaseSensitive = &t
+			}
+
 			if strings.TrimSpace(smifCol.CardinalityCategory) == "" {
 				smifCol.CardinalityCategory = "unknown"
 			}

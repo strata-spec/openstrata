@@ -223,32 +223,38 @@ func Profile(ctx context.Context, pool *pgxpool.Pool, tables []TableInfo, progre
 						p.ColumnProfiledWithStats(t.Name, col.Name, profile, done, totalColumns)
 					}
 				}
-			}
 
-			// Enumerate all distinct values for low-cardinality text columns so
-			// that the semantic layer can surface valid_values to LLM query agents.
-			// Only runs when the sample shows fewer than validValuesEnumLimit
-			// distinct values to avoid enumerating high-cardinality free-text columns.
-			for _, col := range t.Columns {
-				if !isTextLikeType(col.DataType) {
-					continue
+				// Enumerate all distinct values for low-cardinality text columns so
+				// that the semantic layer can surface valid_values to LLM query agents.
+				// Only runs when the sample shows fewer than validValuesEnumLimit
+				// distinct values to avoid enumerating high-cardinality free-text columns.
+				tableCtx := batchCtx
+				tableCancel := func() {}
+				if profileTimeoutSecs > 0 {
+					tableCtx, tableCancel = context.WithTimeout(batchCtx, time.Duration(profileTimeoutSecs)*time.Second)
 				}
-				profileKey := t.Name + "." + col.Name
-				mu.Lock()
-				prof := profiles[profileKey]
-				mu.Unlock()
-				if prof.DistinctCount <= 0 || prof.DistinctCount >= validValuesEnumLimit {
-					continue
+				for _, col := range t.Columns {
+					if !isTextLikeType(col.DataType) {
+						continue
+					}
+					profileKey := t.Name + "." + col.Name
+					mu.Lock()
+					prof := profiles[profileKey]
+					mu.Unlock()
+					if prof.DistinctCount <= 0 || prof.DistinctCount >= validValuesEnumLimit {
+						continue
+					}
+					vals, enumErr := enumerateDistinctValues(tableCtx, pool, t, col.Name)
+					if enumErr != nil {
+						log.Printf("profile: table %s.%s column %s: enumerate distinct values: %v", t.Schema, t.Name, col.Name, enumErr)
+						continue
+					}
+					prof.ValidValues = vals
+					mu.Lock()
+					profiles[profileKey] = prof
+					mu.Unlock()
 				}
-				vals, enumErr := enumerateDistinctValues(tableCtx, pool, t, col.Name)
-				if enumErr != nil {
-					log.Printf("profile: table %s.%s column %s: enumerate distinct values: %v", t.Schema, t.Name, col.Name, enumErr)
-					continue
-				}
-				prof.ValidValues = vals
-				mu.Lock()
-				profiles[profileKey] = prof
-				mu.Unlock()
+				tableCancel()
 			}
 
 			return nil
