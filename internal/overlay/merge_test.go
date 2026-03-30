@@ -80,6 +80,79 @@ func TestOmdbCastsDescriptionCorrectionFixture(t *testing.T) {
 	}
 }
 
+// TestOmdbAccessLogSuppressCorrection verifies that the suppress correction for
+// access_log is applied by the overlay, removing it from the effective model
+// list visible to query agents.
+func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	// access_log must exist in the raw semantic file to confirm fixture is set up correctly.
+	var rawAccessLog *smif.Model
+	for i := range model.Models {
+		if model.Models[i].ModelID == "access_log" {
+			rawAccessLog = &model.Models[i]
+			break
+		}
+	}
+	if rawAccessLog == nil {
+		t.Fatalf("access_log model not found in omdb_semantic.yaml")
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	// Locate the suppress correction for access_log.
+	var suppressCorr *Correction
+	for i := range corrections.Corrections {
+		c := &corrections.Corrections[i]
+		if c.TargetType == "model" && c.TargetID == "access_log" && c.CorrectionType == "suppress" {
+			suppressCorr = c
+			break
+		}
+	}
+	if suppressCorr == nil {
+		t.Fatalf("expected a suppress correction for access_log in omdb_corrections.yaml")
+	}
+	if suppressCorr.Source != "user_defined" {
+		t.Errorf("correction source = %q, want user_defined", suppressCorr.Source)
+	}
+	if suppressCorr.Status != "approved" {
+		t.Errorf("correction status = %q, want approved", suppressCorr.Status)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	// After overlay, access_log must be marked suppressed.
+	var mergedAccessLog *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "access_log" {
+			mergedAccessLog = &merged.Models[i]
+			break
+		}
+	}
+	if mergedAccessLog == nil {
+		t.Fatalf("access_log model not found in merged output")
+	}
+	if !mergedAccessLog.Suppressed {
+		t.Errorf("expected access_log to be suppressed after overlay")
+	}
+	if mergedAccessLog.Provenance.SourceType != "user_defined" {
+		t.Errorf("access_log provenance source_type = %q, want user_defined", mergedAccessLog.Provenance.SourceType)
+	}
+}
+
 func TestApplyOverlayDescriptionOverride(t *testing.T) {
 	original := overlayBaseModel()
 	corrections := &CorrectionsFile{

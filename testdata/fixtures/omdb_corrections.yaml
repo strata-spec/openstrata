@@ -20,3 +20,12 @@ corrections:
     source: user_defined
     status: approved
     timestamp: "2026-03-29T20:31:21Z"
+  - correction_id: corr_str26bb
+    target_type: model
+    target_id: access_log
+    correction_type: suppress
+    new_value: "true"
+    reason: "Web server access log — not a domain model, no business meaning for query agents."
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:49Z"

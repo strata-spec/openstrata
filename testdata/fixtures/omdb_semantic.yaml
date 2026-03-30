@@ -92,6 +92,84 @@ models:
           confidence: 0.9
           human_reviewed: false
 
+  - model_id: access_log
+    name: access_log
+    label: Access Log
+    grain: One row per HTTP request
+    description: >
+      Web server access log. Each row records one HTTP request served by the
+      application. Contains request metadata such as method, path, status code,
+      and response time. This is an operational log table with no domain meaning.
+    physical_source:
+      schema: public
+      table: access_log
+    primary_key: id
+    ddl_fingerprint: "access_log_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.6
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: bigint
+        role: identifier
+        label: Log ID
+        description: Surrogate primary key for the log entry.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: method
+        data_type: text
+        role: dimension
+        label: HTTP Method
+        description: HTTP request method (e.g. GET, POST, PUT, DELETE).
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: status_code
+        data_type: integer
+        role: dimension
+        label: HTTP Status Code
+        description: HTTP response status code returned by the server.
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: path
+        data_type: text
+        role: dimension
+        label: Request Path
+        description: URL path of the HTTP request.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: requested_at
+        data_type: timestamptz
+        role: timestamp
+        label: Requested At
+        description: Timestamp when the HTTP request was received, in UTC.
+        nullable: false
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.9
+          human_reviewed: false
+
   - model_id: casts
     name: casts
     label: Cast Assignments
