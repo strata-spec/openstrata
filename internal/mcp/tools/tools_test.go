@@ -525,6 +525,294 @@ func TestRecordCorrectionLivePayloadColumn(t *testing.T) {
 	t.Logf("record_correction response=%v", out)
 }
 
+// ---------------------------------------------------------------------------
+// FormatSMIFContext tests
+// ---------------------------------------------------------------------------
+
+// multiTableFixture builds a semantic model that mirrors the q011/q012
+// failure scenario: `orders` is the driving table mentioned in the question,
+// `categories` and `jobs` are join targets that must be included via the
+// one-hop expansion even though they are never mentioned in the question text.
+func multiTableFixture() *smif.SemanticModel {
+	return &smif.SemanticModel{
+		SMIFVersion: "0.1.0",
+		Domain:      smif.Domain{Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+		Models: []smif.Model{
+			{
+				ModelID:        "orders",
+				Name:           "orders",
+				Label:          "Orders",
+				Description:    "Order header records.",
+				Grain:          "one row per order",
+				PhysicalSource: smif.PhysicalSource{Schema: "public", Table: "orders"},
+				Columns: []smif.Column{
+					{Name: "id", Label: "Order ID", Description: "Primary key", Role: "identifier", DataType: "int", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+					{Name: "category_id", Label: "Category ID", Description: "FK to categories", Role: "identifier", DataType: "int", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+					{Name: "job_id", Label: "Job ID", Description: "FK to jobs", Role: "identifier", DataType: "int", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+				},
+				Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+			{
+				ModelID:        "categories",
+				Name:           "categories",
+				Label:          "Categories",
+				Description:    "Order category lookup.",
+				Grain:          "one row per category",
+				PhysicalSource: smif.PhysicalSource{Schema: "public", Table: "categories"},
+				Columns: []smif.Column{
+					{Name: "id", Label: "Category ID", Description: "Primary key", Role: "identifier", DataType: "int", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+					{Name: "name", Label: "Category Name", Description: "Human-readable category name", Role: "dimension", DataType: "text", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+				},
+				Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+			{
+				ModelID:        "jobs",
+				Name:           "jobs",
+				Label:          "Jobs",
+				Description:    "Job postings associated with orders.",
+				Grain:          "one row per job",
+				PhysicalSource: smif.PhysicalSource{Schema: "public", Table: "jobs"},
+				Columns: []smif.Column{
+					{Name: "id", Label: "Job ID", Description: "Primary key", Role: "identifier", DataType: "int", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+					{Name: "title", Label: "Job Title", Description: "Title of the job posting", Role: "dimension", DataType: "text", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}},
+				},
+				Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+			{
+				ModelID:        "hidden",
+				Name:           "hidden",
+				Label:          "Hidden",
+				Description:    "Suppressed — must never appear in output.",
+				Suppressed:     true,
+				PhysicalSource: smif.PhysicalSource{Schema: "public", Table: "hidden"},
+				Columns:        []smif.Column{{Name: "id", DataType: "int", Role: "identifier", Provenance: smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9}}},
+				Provenance:     smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+		},
+		Relationships: []smif.Relationship{
+			{
+				RelationshipID:   "rel_orders_categories",
+				FromModel:        "orders",
+				FromColumn:       "category_id",
+				ToModel:          "categories",
+				ToColumn:         "id",
+				RelationshipType: "many_to_one",
+				JoinCondition:    "orders.category_id = categories.id",
+				Provenance:       smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+			{
+				RelationshipID:   "rel_orders_jobs",
+				FromModel:        "orders",
+				FromColumn:       "job_id",
+				ToModel:          "jobs",
+				ToColumn:         "id",
+				RelationshipType: "many_to_one",
+				JoinCondition:    "orders.job_id = jobs.id",
+				Provenance:       smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+			{
+				RelationshipID:   "rel_hidden",
+				FromModel:        "hidden",
+				FromColumn:       "id",
+				ToModel:          "orders",
+				ToColumn:         "id",
+				RelationshipType: "many_to_one",
+				JoinCondition:    "hidden.id = orders.id",
+				Suppressed:       true,
+				Provenance:       smif.Provenance{SourceType: "llm_inferred", Confidence: 0.9},
+			},
+		},
+	}
+}
+
+// modelIDsInContext extracts the model_id values from a format_smif_context response.
+func modelIDsInContext(t *testing.T, text string) map[string]bool {
+	t.Helper()
+	var out struct {
+		Models []struct {
+			ModelID string `json:"model_id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("unmarshal format_smif_context response: %v\ntext: %s", err, text)
+	}
+	ids := make(map[string]bool, len(out.Models))
+	for _, m := range out.Models {
+		ids[m.ModelID] = true
+	}
+	return ids
+}
+
+// TestFormatSMIFContextRequiresQuestion ensures the tool returns an error
+// when the question parameter is empty.
+func TestFormatSMIFContextRequiresQuestion(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return multiTableFixture() })
+
+	_, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{"question": ""}))
+	if err == nil {
+		t.Fatal("expected error for empty question")
+	}
+}
+
+// TestFormatSMIFContextNilModel ensures the tool returns an empty result
+// rather than panicking when no model is loaded.
+func TestFormatSMIFContextNilModel(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return nil })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{"question": "how many orders"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := extractText(t, res)
+	if text != "{}" {
+		t.Fatalf("expected empty object, got %s", text)
+	}
+}
+
+// TestFormatSMIFContextPass1KeywordMatch verifies that a model whose name
+// appears in the question is included in the result (Pass 1).
+func TestFormatSMIFContextPass1KeywordMatch(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return multiTableFixture() })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{
+		"question": "how many orders were placed this month",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	ids := modelIDsInContext(t, extractText(t, res))
+	if !ids["orders"] {
+		t.Fatalf("expected orders in context, got %v", ids)
+	}
+}
+
+// TestFormatSMIFContextPass2OneHopExpansion is the regression test for
+// q011 and q012: the question only mentions "orders" but the query requires
+// joining to "categories" and "jobs". Pass 2 must include both join targets
+// in the returned context.
+func TestFormatSMIFContextPass2OneHopExpansion(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return multiTableFixture() })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{
+		"question": "how many orders were placed this month",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	ids := modelIDsInContext(t, extractText(t, res))
+
+	if !ids["orders"] {
+		t.Errorf("expected orders in context (pass 1), got %v", ids)
+	}
+	if !ids["categories"] {
+		t.Errorf("expected categories in context (pass 2 one-hop), got %v", ids)
+	}
+	if !ids["jobs"] {
+		t.Errorf("expected jobs in context (pass 2 one-hop), got %v", ids)
+	}
+}
+
+// TestFormatSMIFContextSuppressedModelsExcluded verifies that suppressed
+// models are never returned, even when they have relationships to seed models.
+func TestFormatSMIFContextSuppressedModelsExcluded(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return multiTableFixture() })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{
+		"question": "how many orders were placed this month",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	ids := modelIDsInContext(t, extractText(t, res))
+	if ids["hidden"] {
+		t.Errorf("suppressed model 'hidden' must not appear in context, got %v", ids)
+	}
+}
+
+// TestFormatSMIFContextRelationshipsIncluded verifies that the relationships
+// array in the response includes the join paths between selected models.
+func TestFormatSMIFContextRelationshipsIncluded(t *testing.T) {
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return multiTableFixture() })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{
+		"question": "how many orders were placed this month",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	var out struct {
+		Relationships []struct {
+			RelationshipID string `json:"relationship_id"`
+		} `json:"relationships"`
+	}
+	if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	relIDs := make(map[string]bool, len(out.Relationships))
+	for _, r := range out.Relationships {
+		relIDs[r.RelationshipID] = true
+	}
+
+	if !relIDs["rel_orders_categories"] {
+		t.Errorf("expected rel_orders_categories in relationships, got %v", relIDs)
+	}
+	if !relIDs["rel_orders_jobs"] {
+		t.Errorf("expected rel_orders_jobs in relationships, got %v", relIDs)
+	}
+}
+
+// TestFormatSMIFContextSuppressedColumnsExcluded verifies that suppressed
+// columns within a returned model are not included in the output.
+func TestFormatSMIFContextSuppressedColumnsExcluded(t *testing.T) {
+	model := multiTableFixture()
+	// Inject a suppressed column into orders.
+	model.Models[0].Columns = append(model.Models[0].Columns, smif.Column{
+		Name:        "secret",
+		Label:       "Secret",
+		Description: "Internal field",
+		Role:        "dimension",
+		DataType:    "text",
+		Suppressed:  true,
+		Provenance:  smif.Provenance{SourceType: "llm_inferred", Confidence: 0.5},
+	})
+
+	_, handler := FormatSMIFContext(func() *smif.SemanticModel { return model })
+
+	res, err := handler(context.Background(), callRequest("format_smif_context", map[string]any{
+		"question": "how many orders were placed this month",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	var out struct {
+		Models []struct {
+			ModelID string `json:"model_id"`
+			Columns []struct {
+				Name string `json:"name"`
+			} `json:"columns"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, m := range out.Models {
+		if m.ModelID != "orders" {
+			continue
+		}
+		for _, c := range m.Columns {
+			if c.Name == "secret" {
+				t.Fatalf("suppressed column 'secret' must not appear in orders columns")
+			}
+		}
+	}
+}
+
 type stubReloadableServer struct {
 	correctionsPath string
 	smifVersion     string
