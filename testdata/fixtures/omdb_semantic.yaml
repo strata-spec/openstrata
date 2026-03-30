@@ -260,6 +260,73 @@ models:
           confidence: 0.8
           human_reviewed: false
 
+  - model_id: categories
+    name: categories
+    label: Categories
+    grain: One row per category node
+    description: >
+      Hierarchical category taxonomy used to classify films by type. Each row is
+      one category node. parent_id references categories.id, forming a
+      self-referential hierarchy. root_id identifies the top-level category type
+      that this node belongs to.
+    physical_source:
+      schema: public
+      table: categories
+    primary_key: id
+    ddl_fingerprint: "categories_fingerprint"
+    provenance:
+      source_type: llm_inferred
+      confidence: 0.8
+      human_reviewed: false
+    columns:
+      - name: id
+        data_type: integer
+        role: identifier
+        label: Category ID
+        description: Surrogate primary key for the category node.
+        nullable: false
+        cardinality_category: medium
+        provenance:
+          source_type: schema_constraint
+          confidence: 1.0
+          human_reviewed: false
+
+      - name: name
+        data_type: text
+        role: dimension
+        label: Category Name
+        description: Display name of the category node.
+        nullable: false
+        cardinality_category: medium
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: parent_id
+        data_type: integer
+        role: dimension
+        label: Parent Category ID
+        description: Self-referential foreign key to categories.id. NULL for top-level root nodes.
+        nullable: true
+        cardinality_category: medium
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.8
+          human_reviewed: false
+
+      - name: root_id
+        data_type: integer
+        role: dimension
+        label: Root Category ID
+        description: Top-level ancestor category for this node.
+        nullable: false
+        cardinality_category: low
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.7
+          human_reviewed: false
+
 relationships:
   - relationship_id: rel_casts_movies
     from_model: casts
