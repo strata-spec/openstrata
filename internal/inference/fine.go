@@ -187,7 +187,10 @@ func buildFinePassPrompt(
 	b.WriteString("  dimension   - categorical attribute used for grouping or filtering\n")
 	b.WriteString("  measure     - numeric value intended for aggregation\n")
 	b.WriteString("  timestamp   - date, time, or datetime column\n")
-	b.WriteString("  flag        - boolean or binary indicator (is_active, has_shipped, etc.)\n\n")
+	b.WriteString("  flag        - boolean or binary indicator (is_active, has_shipped, etc.)\n")
+	b.WriteString("  NOTE: integer columns used as version numbers, ordinals, or sort keys\n")
+	b.WriteString("  (e.g. schema_version, display_order, sort_rank, seq, row_index) are\n")
+	b.WriteString("  role: dimension, not identifier, unless they carry a PK or FK constraint.\n\n")
 
 	pkSet := make(map[string]struct{}, len(table.PrimaryKey))
 	for _, pk := range table.PrimaryKey {
@@ -296,8 +299,82 @@ func applyPostProcessing(result *FinePassResult, table postgres.TableInfo) {
 		ordered = ordered[:expected]
 	}
 
+	// Build PK and FK sets for constraint-aware role correction.
+	pkSet := make(map[string]struct{}, len(table.PrimaryKey))
+	for _, pk := range table.PrimaryKey {
+		pkSet[strings.ToLower(pk)] = struct{}{}
+	}
+	fkSet := make(map[string]struct{})
+	for _, fk := range table.ForeignKeys {
+		for _, col := range fk.FromColumns {
+			fkSet[strings.ToLower(col)] = struct{}{}
+		}
+	}
+
+	// Build data-type lookup by column name.
+	typeByCol := make(map[string]string, len(table.Columns))
+	for _, tc := range table.Columns {
+		typeByCol[strings.ToLower(tc.Name)] = tc.DataType
+	}
+
+	// Correct integer columns that match ordinal/version name patterns but
+	// were classified as identifier by the LLM. Such columns are only true
+	// identifiers when they carry a PK or FK constraint; without one they
+	// are categorical/ordinal dimensions (e.g. schema_version, display_order).
+	for i := range ordered {
+		col := &ordered[i]
+		if col.Role != "identifier" {
+			continue
+		}
+		lower := strings.ToLower(col.ColumnName)
+		if _, isPK := pkSet[lower]; isPK {
+			continue
+		}
+		if _, isFK := fkSet[lower]; isFK {
+			continue
+		}
+		if isIntegerDataType(typeByCol[lower]) && isOrdinalPattern(lower) {
+			col.Role = "dimension"
+			col.NeedsReview = true
+			// Ensure confidence will be < 0.8 by keeping difficulty at least
+			// context_dependent (self_evident would yield exactly 0.80).
+			if col.Difficulty == "" || col.Difficulty == "self_evident" {
+				col.Difficulty = "context_dependent"
+			}
+		}
+	}
+
 	result.TableName = table.Name
 	result.Columns = ordered
+}
+
+// ordinalSuffixes lists column-name suffixes that indicate an ordinal,
+// version, or sort-key column rather than an entity identifier.
+var ordinalSuffixes = []string{
+	"_version", "_order", "_rank", "_seq", "_index",
+}
+
+// isOrdinalPattern reports whether colName ends with one of the known
+// ordinal/version suffixes. The comparison is case-insensitive.
+func isOrdinalPattern(colName string) bool {
+	lower := strings.ToLower(colName)
+	for _, sfx := range ordinalSuffixes {
+		if strings.HasSuffix(lower, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
+// isIntegerDataType reports whether the Postgres data type string represents
+// an integer family type.
+func isIntegerDataType(dt string) bool {
+	switch strings.TrimSpace(strings.ToLower(dt)) {
+	case "integer", "int", "int2", "int4", "int8",
+		"bigint", "smallint", "serial", "bigserial", "smallserial":
+		return true
+	}
+	return false
 }
 
 func defaultColumnResult(tableName, columnName string) ColumnResult {
