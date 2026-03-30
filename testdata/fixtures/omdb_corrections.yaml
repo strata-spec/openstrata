@@ -20,6 +20,28 @@ corrections:
     source: user_defined
     status: approved
     timestamp: "2026-03-29T20:31:21Z"
+  - correction_id: corr_str27va
+    target_type: column
+    target_id: movies.vote_average
+    correction_type: description_override
+    new_value: >-
+      Average user rating (0–10). Only meaningful for rows where kind = 'movie'
+      — always include WHERE kind = 'movie' when aggregating or ranking by this
+      column. TV series and episodes have ratings that should not be mixed with
+      film ratings.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:10Z"
+  - correction_id: corr_str27vc
+    target_type: column
+    target_id: movies.votes_count
+    correction_type: description_override
+    new_value: >-
+      Number of user votes. Only meaningful for rows where kind = 'movie' —
+      always include WHERE kind = 'movie' when filtering or ranking by votes.
+    source: user_defined
+    status: approved
+    timestamp: "2026-03-29T21:42:10Z"
   - correction_id: corr_str26bb
     target_type: model
     target_id: access_log

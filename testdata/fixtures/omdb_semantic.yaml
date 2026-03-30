@@ -92,6 +92,28 @@ models:
           confidence: 0.9
           human_reviewed: false
 
+      - name: vote_average
+        data_type: numeric
+        role: measure
+        label: Average Rating
+        description: Average user rating on a 0-10 scale.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
+          human_reviewed: false
+
+      - name: votes_count
+        data_type: integer
+        role: measure
+        label: Vote Count
+        description: Total number of user votes recorded for the title.
+        nullable: true
+        cardinality_category: high
+        provenance:
+          source_type: llm_inferred
+          confidence: 0.85
   - model_id: access_log
     name: access_log
     label: Access Log
