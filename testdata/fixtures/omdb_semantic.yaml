@@ -303,12 +303,6 @@ models:
       human_reviewed: false
     columns:
       - name: id
-        data_type: bigint
-        role: identifier
-        label: Job ID
-        description: Surrogate primary key for the job record.
-        nullable: false
-        cardinality_category: low
         data_type: integer
         role: identifier
         label: Category ID
@@ -323,10 +317,6 @@ models:
       - name: name
         data_type: text
         role: dimension
-        label: Job Name
-        description: Title of the job or crew role.
-        nullable: false
-        cardinality_category: low
         label: Category Name
         description: Display name of the category node.
         nullable: false
@@ -361,7 +351,7 @@ models:
           human_reviewed: false
 
 relationships:
-  - relationship_id: rel_casts_jobs
+  - relationship_id: casts_job_id_to_jobs
     from_model: casts
     from_column: job_id
     to_model: jobs

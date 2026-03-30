@@ -247,10 +247,6 @@ func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
 // description correction is applied, giving agents the multilingual context
 // needed to construct correct filters for German job titles (e.g. "Drehbuch").
 func TestOmdbJobsMultilingualCorrectionFixture(t *testing.T) {
-// TestOmdbCategoriesRootIDCorrectionFixture verifies that the description
-// override correction for categories.root_id is applied by the overlay,
-// ensuring query agents can construct valid genre and keyword filters.
-func TestOmdbCategoriesRootIDCorrectionFixture(t *testing.T) {
 	root := repoRoot()
 	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
 	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
@@ -294,23 +290,6 @@ func TestOmdbCategoriesRootIDCorrectionFixture(t *testing.T) {
 	}
 	if jobsCorr.Status != "approved" {
 		t.Errorf("correction status = %q, want approved", jobsCorr.Status)
-	// Locate the root_id correction.
-	var rootIDCorr *Correction
-	for i := range corrections.Corrections {
-		c := &corrections.Corrections[i]
-		if c.TargetType == "column" && c.TargetID == "categories.root_id" && c.CorrectionType == "description_override" {
-			rootIDCorr = c
-			break
-		}
-	}
-	if rootIDCorr == nil {
-		t.Fatalf("expected a description_override correction for categories.root_id in omdb_corrections.yaml")
-	}
-	if rootIDCorr.Source != "user_defined" {
-		t.Errorf("correction source = %q, want user_defined", rootIDCorr.Source)
-	}
-	if rootIDCorr.Status != "approved" {
-		t.Errorf("correction status = %q, want approved", rootIDCorr.Status)
 	}
 
 	merged, err := ApplyOverlay(model, corrections)
@@ -339,6 +318,51 @@ func TestOmdbCategoriesRootIDCorrectionFixture(t *testing.T) {
 		if !strings.Contains(mergedJobs.Description, required) {
 			t.Errorf("jobs description missing required term %q: %q", required, mergedJobs.Description)
 		}
+	}
+}
+
+// TestOmdbCategoriesRootIDCorrectionFixture verifies that the description
+// override correction for categories.root_id is applied by the overlay,
+// ensuring query agents can construct valid genre and keyword filters.
+func TestOmdbCategoriesRootIDCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	// Locate the root_id correction.
+	var rootIDCorr *Correction
+	for i := range corrections.Corrections {
+		c := &corrections.Corrections[i]
+		if c.TargetType == "column" && c.TargetID == "categories.root_id" && c.CorrectionType == "description_override" {
+			rootIDCorr = c
+			break
+		}
+	}
+	if rootIDCorr == nil {
+		t.Fatalf("expected a description_override correction for categories.root_id in omdb_corrections.yaml")
+	}
+	if rootIDCorr.Source != "user_defined" {
+		t.Errorf("correction source = %q, want user_defined", rootIDCorr.Source)
+	}
+	if rootIDCorr.Status != "approved" {
+		t.Errorf("correction status = %q, want approved", rootIDCorr.Status)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
 	var categoriesModel *smif.Model
 	for i := range merged.Models {
 		if merged.Models[i].ModelID == "categories" {
