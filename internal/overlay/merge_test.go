@@ -81,6 +81,61 @@ func TestOmdbCastsDescriptionCorrectionFixture(t *testing.T) {
 }
 
 func TestOmdbMovieRatingsCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	want := map[string]string{
+		"vote_average": "always include WHERE kind = 'movie' when aggregating or ranking by this column",
+		"votes_count":  "always include WHERE kind = 'movie' when filtering or ranking by votes",
+	}
+
+	var moviesModel *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "movies" {
+			moviesModel = &merged.Models[i]
+			break
+		}
+	}
+	if moviesModel == nil {
+		t.Fatalf("movies model not found in merged output")
+	}
+
+	for colName, snippet := range want {
+		var col *smif.Column
+		for i := range moviesModel.Columns {
+			if moviesModel.Columns[i].Name == colName {
+				col = &moviesModel.Columns[i]
+				break
+			}
+		}
+		if col == nil {
+			t.Fatalf("column %s not found in movies model", colName)
+		}
+		if !strings.Contains(col.Description, snippet) {
+			t.Fatalf("column %s description missing required guidance; got: %q", colName, col.Description)
+		}
+		if col.Provenance.SourceType != "user_defined" {
+			t.Fatalf("column %s provenance source_type = %q, want user_defined", colName, col.Provenance.SourceType)
+		}
+	}
+}
+
 // TestOmdbAccessLogSuppressCorrection verifies that the suppress correction for
 // access_log is applied by the overlay, removing it from the effective model
 // list visible to query agents.
@@ -135,39 +190,6 @@ func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
 		t.Fatalf("ApplyOverlay() error = %v", err)
 	}
 
-	want := map[string]string{
-		"vote_average": "always include WHERE kind = 'movie' when aggregating or ranking by this column",
-		"votes_count":  "always include WHERE kind = 'movie' when filtering or ranking by votes",
-	}
-
-	var moviesModel *smif.Model
-	for i := range merged.Models {
-		if merged.Models[i].ModelID == "movies" {
-			moviesModel = &merged.Models[i]
-			break
-		}
-	}
-	if moviesModel == nil {
-		t.Fatalf("movies model not found in merged output")
-	}
-
-	for colName, snippet := range want {
-		var col *smif.Column
-		for i := range moviesModel.Columns {
-			if moviesModel.Columns[i].Name == colName {
-				col = &moviesModel.Columns[i]
-				break
-			}
-		}
-		if col == nil {
-			t.Fatalf("column %s not found in movies model", colName)
-		}
-		if !strings.Contains(col.Description, snippet) {
-			t.Fatalf("column %s description missing required guidance; got: %q", colName, col.Description)
-		}
-		if col.Provenance.SourceType != "user_defined" {
-			t.Fatalf("column %s provenance source_type = %q, want user_defined", colName, col.Provenance.SourceType)
-		}
 	// After overlay, access_log must be marked suppressed.
 	var mergedAccessLog *smif.Model
 	for i := range merged.Models {
@@ -184,6 +206,84 @@ func TestOmdbAccessLogSuppressCorrection(t *testing.T) {
 	}
 	if mergedAccessLog.Provenance.SourceType != "user_defined" {
 		t.Errorf("access_log provenance source_type = %q, want user_defined", mergedAccessLog.Provenance.SourceType)
+	}
+}
+
+// TestOmdbJobsMultilingualCorrectionFixture verifies that the jobs model
+// description correction is applied, giving agents the multilingual context
+// needed to construct correct filters for German job titles (e.g. "Drehbuch").
+func TestOmdbJobsMultilingualCorrectionFixture(t *testing.T) {
+	root := repoRoot()
+	semanticPath := filepath.Join(root, "testdata", "fixtures", "omdb_semantic.yaml")
+	correctionsPath := filepath.Join(root, "testdata", "fixtures", "omdb_corrections.yaml")
+
+	model, err := smif.ReadYAML(semanticPath)
+	if err != nil {
+		t.Fatalf("read omdb_semantic.yaml: %v", err)
+	}
+
+	// jobs model must exist in the raw semantic file.
+	var rawJobs *smif.Model
+	for i := range model.Models {
+		if model.Models[i].ModelID == "jobs" {
+			rawJobs = &model.Models[i]
+			break
+		}
+	}
+	if rawJobs == nil {
+		t.Fatalf("jobs model not found in omdb_semantic.yaml")
+	}
+
+	corrections, err := LoadCorrections(correctionsPath)
+	if err != nil {
+		t.Fatalf("read omdb_corrections.yaml: %v", err)
+	}
+
+	// Locate the jobs description_override correction.
+	var jobsCorr *Correction
+	for i := range corrections.Corrections {
+		c := &corrections.Corrections[i]
+		if c.TargetType == "model" && c.TargetID == "jobs" && c.CorrectionType == "description_override" {
+			jobsCorr = c
+			break
+		}
+	}
+	if jobsCorr == nil {
+		t.Fatalf("expected a description_override correction for jobs in omdb_corrections.yaml")
+	}
+	if jobsCorr.Source != "user_defined" {
+		t.Errorf("correction source = %q, want user_defined", jobsCorr.Source)
+	}
+	if jobsCorr.Status != "approved" {
+		t.Errorf("correction status = %q, want approved", jobsCorr.Status)
+	}
+
+	merged, err := ApplyOverlay(model, corrections)
+	if err != nil {
+		t.Fatalf("ApplyOverlay() error = %v", err)
+	}
+
+	var mergedJobs *smif.Model
+	for i := range merged.Models {
+		if merged.Models[i].ModelID == "jobs" {
+			mergedJobs = &merged.Models[i]
+			break
+		}
+	}
+	if mergedJobs == nil {
+		t.Fatalf("jobs model not found in merged output")
+	}
+
+	// The correction must have been applied — provenance must now be user_defined.
+	if mergedJobs.Provenance.SourceType != "user_defined" {
+		t.Errorf("jobs provenance source_type = %q, want user_defined", mergedJobs.Provenance.SourceType)
+	}
+
+	// The description must contain the multilingual guidance for German terms.
+	for _, required := range []string{"Drehbuch", "multilingual", "Regie"} {
+		if !strings.Contains(mergedJobs.Description, required) {
+			t.Errorf("jobs description missing required term %q: %q", required, mergedJobs.Description)
+		}
 	}
 }
 
